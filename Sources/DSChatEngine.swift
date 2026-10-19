@@ -14,7 +14,6 @@ struct PatchState {
         if let code = (json["code"] as? NSNumber)?.intValue, code != 0 {
             let m = json["msg"] as? String ?? "未知错误(\(code))"
             EngineLog.shared.add("上游错误帧: code=\(code) msg=\(m)")
-            fragments = fragments // no-op
             events.append(.done(finishReason: "error:\(m)"))
             return events
         }
