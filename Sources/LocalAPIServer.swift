@@ -38,7 +38,7 @@ final class LocalAPIServer: ObservableObject {
             DispatchQueue.main.async {
                 self?.running = state == .ready
             }
-            if state == .failed { l.cancel() }
+            if case .failed = state { l.cancel() }
         }
         l.start(queue: queue)
         listener = l
