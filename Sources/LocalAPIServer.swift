@@ -253,6 +253,7 @@ final class LocalAPIServer: ObservableObject {
                         switch ev {
                         case .thinkDelta(let t): think += t
                         case .contentDelta(let t): content += t
+                        case .meta: break
                         case .done(let fr):
                             if let fr, fr.hasPrefix("error:") { errMsg = String(fr.dropFirst(6)) }
                         }
