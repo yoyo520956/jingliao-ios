@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+// DeepSeekHashV1 求解器：加载官方 sha3 wasm，按 wasm-bindgen ABI 调 wasm_solve
+let M = null, mem = null, addStack = null, malloc = null, solveName = null;
+
+function post(m) { try { webkit.messageHandlers.pow.postMessage(m); } catch (e) {} }
+
+window.__ready = function () { post({ t: 'ready' }); return 'ok'; };
+
+window.__loadWasm = function (b64) {
+  try {
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    WebAssembly.instantiate(bytes, {}).then(function (res) {
+      const e = res.instance.exports;
+      mem = e.memory;
+      addStack = e['__wbindgen_add_to_stack_pointer'] || null;
+      if (!addStack) { post({ t: 'wasmerr', e: 'add_to_stack_pointer 导出缺失' }); return; }
+      malloc = e['__wbindgen_malloc'] || null;
+      if (!malloc) {
+        const keys = Object.keys(e);
+        for (let i = 0; i < keys.length; i++) {
+          const k = keys[i];
+          if (k.indexOf('__wbindgen_export') === 0) {
+            try {
+              const p = e[k](16, 1);
+              if (typeof p === 'number' && p > 0) { malloc = e[k]; break; }
+            } catch (_) {}
+          }
+        }
+      }
+      if (!malloc) { post({ t: 'wasmerr', e: 'allocator 导出缺失' }); return; }
+      if (typeof e['wasm_solve'] === 'function') solveName = 'wasm_solve';
+      else {
+        const keys2 = Object.keys(e);
+        for (let i = 0; i < keys2.length; i++) {
+          const k = keys2[i];
+          if (k.indexOf('solve') >= 0 && typeof e[k] === 'function') { solveName = k; break; }
+        }
+      }
+      if (!solveName) { post({ t: 'wasmerr', e: 'wasm_solve 导出缺失' }); return; }
+      M = e;
+      post({ t: 'wasmok' });
+    }).catch(function (err) { post({ t: 'wasmerr', e: String(err) }); });
+  } catch (err) { post({ t: 'wasmerr', e: String(err) }); }
+  return 'ok';
+};
+
+function writeString(s) {
+  const enc = new TextEncoder().encode(s);
+  const ptr = malloc(enc.length, 1);
+  new Uint8Array(mem.buffer).set(enc, ptr);
+  return [ptr, enc.length];
+}
+
+window.__solve = function (challenge, salt, expireAt, difficulty) {
+  try {
+    if (!M) return { error: 'wasm 未加载' };
+    const prefix = salt + '_' + expireAt + '_';
+    const retptr = addStack(-16);
+    const a = writeString(challenge);
+    const b = writeString(prefix);
+    M[solveName](retptr, a[0], a[1], b[0], b[1], Number(difficulty));
+    const dv = new DataView(M.memory.buffer);
+    const status = dv.getInt32(retptr, true);
+    const value = dv.getFloat64(retptr + 8, true);
+    addStack(16);
+    if (!status) return { error: '无解' };
+    if (!isFinite(value)) return { error: '答案非有限值' };
+    return { answer: Math.trunc(value) };
+  } catch (err) { return { error: String(err) }; }
+};
+</script>
+</body>
+</html>
