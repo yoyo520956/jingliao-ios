@@ -24,8 +24,8 @@ final class LocalAPIServer: ObservableObject {
         stop()
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        guard let endpoint = NWEndpoint.Host(rawValue: "127.0.0.1"),
-              let p = NWEndpoint.Port(rawValue: port) else { return }
+        let endpoint = NWEndpoint.Host("127.0.0.1")
+        guard let p = NWEndpoint.Port(rawValue: port) else { return }
         params.requiredLocalEndpoint = .hostPort(host: endpoint, port: p)
         guard let l = try? NWListener(using: params) else {
             EngineLog.shared.add("本地服务启动失败（端口 \(port) 被占？）")
@@ -228,6 +228,8 @@ final class LocalAPIServer: ObservableObject {
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
                         case .contentDelta(let t):
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                        case .meta:
+                            break
                         case .done(let fr):
                             if let fr, fr.hasPrefix("error:") {
                                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
