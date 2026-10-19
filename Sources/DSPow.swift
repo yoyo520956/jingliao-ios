@@ -99,7 +99,7 @@ final class DSPowSolver: NSObject, WKScriptMessageHandler {
                 let wv = WKWebView(frame: CGRect(x: -20, y: -20, width: 2, height: 2), configuration: cfg)
                 wv.alpha = 0.01
                 if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-                   let win = scene.windows.first(where: { $0.isKey }) ?? scene.windows.first {
+                   let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
                     win.addSubview(wv)
                 }
                 self.lock.lock(); self.webview = wv; self.lock.unlock()
