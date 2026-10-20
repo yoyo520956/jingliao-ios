@@ -116,7 +116,10 @@ final class LocalAPIServer: ObservableObject {
     static func compactPrompt(_ messages: [[String: Any]]) -> String {
         func tagLine(_ m: [String: Any]) -> String {
             let role = m["role"] as? String ?? "user"
-            let tag = role == "assistant" ? "助手" : (role == "system" ? "系统" : (role == "tool" ? "工具" : "用户")
+            var tag = "用户"
+            if role == "assistant" { tag = "助手" }
+            else if role == "system" { tag = "系统" }
+            else if role == "tool" { tag = "工具" }
             return "[\(tag)] \(msgText(m))"
         }
         let sysIdx = messages.firstIndex { ($0["role"] as? String) == "system" }
