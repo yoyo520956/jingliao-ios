@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
@@ -105,15 +106,26 @@ struct ChatView: View {
                 .background(RoundedRectangle(cornerRadius: 18).fill(Color(.secondarySystemBackground)))
                 .submitLabel(.send)
                 .onSubmit { vm.send() }
-            Button {
-                if vm.busy { vm.stop() } else { vm.send() }
-            } label: {
-                Image(systemName: vm.busy ? "stop.circle.fill" : "arrow.up.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundColor(vm.busy ? Color.red : (vm.draft.isEmpty ? Color.gray : Color.blue))
+            VStack(spacing: 6) {
+                Button {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                } label: {
+                    Image(systemName: "keyboard.chevron.chevron.down")
+                        .font(.system(size: 15))
+                        .foregroundColor(.secondary)
+                        .frame(width: 42, height: 40)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+                }
+                .buttonStyle(.borderless)
+                Button {
+                    if vm.busy { vm.stop() } else { vm.send() }
+                } label: {
+                    Image(systemName: vm.busy ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        .font(.system(size: 26))
+                        .foregroundColor(vm.busy ? Color.red : (vm.draft.isEmpty ? Color.gray : Color.blue))
+                }
+                .buttonStyle(.borderless)
             }
-            .buttonStyle(.borderless)
-            .padding(.bottom, 4)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
