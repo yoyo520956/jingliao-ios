@@ -11,6 +11,7 @@ struct DeviceIDCaptureView: View {
     @State private var gotToken = false
     @State private var manual = ""
     @State private var logs: [String] = []
+    @State private var reloadTick = 0
 
     var body: some View {
         NavigationStack {
@@ -28,6 +29,7 @@ struct DeviceIDCaptureView: View {
                                         if logs.count > 14 { logs.removeFirst(logs.count - 14) }
                                     })
                     }
+                    .id(reloadTick)
                     .frame(minHeight: 300)
                     diagPanel
                 }
@@ -110,6 +112,16 @@ struct DeviceIDCaptureView: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                Button("清登录重来") {
+                    WKWebsiteDataStore.default().removeData(
+                        ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                        modifiedSince: Date(timeIntervalSince1970: 0),
+                        completionHandler: {})
+                    logs.append("已清除网页登录数据，重新登录一次")
+                    reloadTick += 1
+                }
+                .buttonStyle(.bordered)
+                .font(.caption)
             }
         }
         .padding(8)
@@ -168,6 +180,14 @@ struct DeviceIDCaptureView: View {
                     onDevice(val)
                 }
             }
+        } else if body.hasPrefix("__AUTH__") {
+            var t = String(body.dropFirst(8))
+            if t.hasPrefix("Bearer ") { t = String(t.dropFirst(7)) }
+            if t.count > 30, t.count < 2000, !t.contains("{"), !t.contains(" ") {
+                onLogin(t, "")
+            }
+        } else if body.hasPrefix("__LSK__") {
+            onLog("LS键: " + String(body.dropFirst(7)))
         } else if body.hasPrefix("__REQ__") || body.hasPrefix("__RES__") {
             onLog(String(body.prefix(150)))
         } else if let d = body.data(using: .utf8),
@@ -226,16 +246,31 @@ struct DSLoginWebView: UIViewRepresentable {
       function post(m){ try { webkit.messageHandlers.did.postMessage(m); } catch(e){} }
       function isDS(u){ return u && u.indexOf('deepseek.com') >= 0; }
       function sb(b){ try { return typeof b === 'string' ? b : JSON.stringify(b); } catch(e){ return ''; } }
+      function grabAuth(h, url){
+        try {
+          if (!h) return;
+          var a = null;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) {
+            a = h.get('authorization');
+          } else if (Object.prototype.toString.call(h) === '[object Array]') {
+            for (var i = 0; i < h.length; i++) { if (String(h[i][0]).toLowerCase() === 'authorization') a = h[i][1]; }
+          } else if (typeof h === 'object') {
+            for (var k in h) { if (k.toLowerCase() === 'authorization') a = h[k]; }
+          }
+          if (a && String(a).length > 20 && url && url.indexOf('/api/v0/') >= 0) post('__AUTH__' + String(a));
+        } catch(e){}
+      }
       var of = window.fetch;
       if (of) {
         window.fetch = function(input, init){
           var url = typeof input === 'string' ? input : (input && input.url) || '';
           var body = (init && init.body) ? sb(init.body) : '';
-          var isDS = isDS(url);
-          if (isDS) post('__REQ__F ' + url + (body ? ' | ' + body.slice(0, 300) : ''));
+          var isD = isDS(url);
+          if (isD) post('__REQ__F ' + url + (body ? ' | ' + body.slice(0, 300) : ''));
+          grabAuth(init && init.headers, url);
           if (body && body.indexOf('device_id') >= 0) post('__BODY__' + body.slice(0, 3000));
           var p = of.apply(this, arguments);
-          if (isDS) {
+          if (isD) {
             p.then(function(resp){
               try {
                 resp.clone().text().then(function(t){
@@ -249,6 +284,11 @@ struct DSLoginWebView: UIViewRepresentable {
         };
       }
       var oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+      var orh = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.setRequestHeader = function(n, v){
+        try { this.__hh = this.__hh || {}; this.__hh[String(n).toLowerCase()] = v; } catch(e){}
+        return orh.apply(this, arguments);
+      };
       XMLHttpRequest.prototype.open = function(m, u){ this.__u = u; this.__m = m; return oo.apply(this, arguments); };
       XMLHttpRequest.prototype.send = function(b){
         var self = this;
@@ -256,6 +296,7 @@ struct DSLoginWebView: UIViewRepresentable {
           var body = sb(b);
           if (isDS(this.__u)) {
             post('__REQ__X ' + this.__u + (body ? ' | ' + body.slice(0, 300) : ''));
+            grabAuth(this.__hh, this.__u);
             if (body && body.indexOf('device_id') >= 0) post('__BODY__' + body.slice(0, 3000));
             this.addEventListener('load', function(){
               try {
@@ -268,10 +309,12 @@ struct DSLoginWebView: UIViewRepresentable {
         } catch(e){}
         return os.apply(this, arguments);
       };
+      var seen = {};
       function scanLS(){
         try {
           for (var i = 0; i < localStorage.length; i++) {
             var k = localStorage.key(i);
+            if (!seen[k]) { seen[k] = 1; post('__LSK__' + k); }
             var v = String(localStorage.getItem(k) || '');
             if (/token/i.test(k) && v.length > 20 && v.length < 2000) post('__LS__' + k + '=' + v);
             if (/device|shumei|_sm|fm/i.test(k) && v.length >= 20 && v.length <= 300 && v.indexOf('{') < 0) post('__LSD__' + k + '=' + v);
