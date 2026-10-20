@@ -17,7 +17,7 @@ enum DSConfig {
     static let clientOS = "web"
     static let deviceModel = "Windows 10 x64"
     static let modelType = "deep_seek_chat"
-    static let completionSource = "input"
+    static let completionSource = "default"
 }
 
 // ── PoW 挑战 ──────────────────────────────────────────────────────────
