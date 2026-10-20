@@ -149,11 +149,23 @@ struct DeviceIDCaptureView: View {
         } else if body.hasPrefix("__LS__") {
             let kv = String(body.dropFirst(6))
             if let eq = kv.firstIndex(of: "=") {
-                let key = String(kv[..<eq])
+                let key = String(kv[..<eq]).lowercased()
                 let val = String(kv[kv.index(after: eq)...])
-                if key.lowercased().contains("token"), val.count > 20, val.count < 2000,
-                   val.hasPrefix("ey") || !val.lowercased().contains("undefined") {
+                // 登录 token 只认：userToken 键，或 JWT 特征（eyJ 开头且非 JSON）
+                let isJWT = val.hasPrefix("ey") && !val.contains("{") && val.count > 40
+                let isUserTokenKey = key.contains("usertoken")
+                if (isUserTokenKey || isJWT), val.count > 40, val.count < 2000, !val.contains("{") {
                     onLogin(val, "")
+                }
+            }
+        } else if body.hasPrefix("__LSD__") {
+            let kv = String(body.dropFirst(7))
+            if let eq = kv.firstIndex(of: "=") {
+                let val = String(kv[kv.index(after: eq)...])
+                // 数美 device_id 兜底：纯字符串、无 JSON 结构、长度像指纹
+                if val.count >= 20, val.count <= 128, !val.contains("{"), !val.contains(" "),
+                   val.range(of: "^[A-Za-z0-9+/=_-]+$", options: .regularExpression) != nil {
+                    onDevice(val)
                 }
             }
         } else if body.hasPrefix("__REQ__") || body.hasPrefix("__RES__") {
@@ -171,11 +183,9 @@ struct DeviceIDCaptureView: View {
         let user = (j["data"] as? [String: Any])?["user"] as? [String: Any]
             ?? (j["user"] as? [String: Any])
             ?? (j["biz_data"] as? [String: Any])?["user"] as? [String: Any]
-        if let user, let t = user["token"] as? String, !t.isEmpty {
+        // 只认 user 对象里的 token（hif 风控令牌的裸 token 字段一律拒收）
+        if let user, let t = user["token"] as? String, t.count > 30 {
             return (t, user["id"] as? String ?? "")
-        }
-        if let t = j["token"] as? String, t.count > 20 {
-            return (t, "")
         }
         return nil
     }
@@ -264,6 +274,7 @@ struct DSLoginWebView: UIViewRepresentable {
             var k = localStorage.key(i);
             var v = String(localStorage.getItem(k) || '');
             if (/token/i.test(k) && v.length > 20 && v.length < 2000) post('__LS__' + k + '=' + v);
+            if (/device|shumei|_sm|fm/i.test(k) && v.length >= 20 && v.length <= 300 && v.indexOf('{') < 0) post('__LSD__' + k + '=' + v);
           }
         } catch(e){}
       }
