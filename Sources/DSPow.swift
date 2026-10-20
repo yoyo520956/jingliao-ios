@@ -71,19 +71,24 @@ final class DSPowSolver: NSObject, WKScriptMessageHandler {
         let fm = FileManager.default
         if let doc = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             let f = doc.appendingPathComponent("sha3_wasm.bin")
-            if let d = try? Data(contentsOf: f), d.count > 100_000 { return d }
+            if let d = try? Data(contentsOf: f), Self.isValidWasm(d) { return d }
         }
         var req = URLRequest(url: URL(string: DSConfig.wasmURLString)!)
         req.timeoutInterval = 60
         req.setValue(DSConfig.userAgent, forHTTPHeaderField: "User-Agent")
         let (d, r) = try await URLSession.shared.data(for: req)
-        guard (r as? HTTPURLResponse)?.statusCode == 200, d.count > 100_000 else {
+        guard (r as? HTTPURLResponse)?.statusCode == 200, Self.isValidWasm(d) else {
             throw DSError(message: "PoW wasm 下载失败（\(d.count)B）")
         }
         if let doc = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             try? d.write(to: doc.appendingPathComponent("sha3_wasm.bin"))
         }
         return d
+    }
+
+    /// wasm 有效性按魔数 \0asm 判定（真实文件仅 26KB，禁用体积门槛）
+    private static func isValidWasm(_ d: Data) -> Bool {
+        d.count > 8 && d.prefix(4) == Data([0x00, 0x61, 0x73, 0x6D])
     }
 
     private func setupWebview() async throws {
