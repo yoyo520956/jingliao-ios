@@ -10,6 +10,10 @@ enum YaotaiTools {
 
     static let TOOL_CALL_START = "<|tool_calls_begin|>"
     static let TOOL_CALL_END = "<|tool_calls_end|>"
+    /// DeepSeek 网页模型的原生工具标记（网页版 UI 用的就是这套，实测模型优先吐它）
+    /// 形如：<|DSML|calls><|DSML|invoke name="run_command"><|DSML|parameter name="command" string="true">ls<|DSML|parameter>…<|DSML|invoke><|DSML|calls>
+    static let DSML_CALLS_OPEN = "<|DSML|calls>"
+    static let DSML_INVOKE_OPEN = "<|DSML|invoke"
 
     // MARK: - 请求侧：工具定义注入 prompt
 
@@ -51,9 +55,13 @@ enum YaotaiTools {
         // 格式模板与规则
         lines.append("**工具调用格式 — 请严格遵守：**")
         lines.append("")
-        lines.append("将 JSON 数组包裹在工具调用标记中：")
+        lines.append("方式一（JSON 标记）：将 JSON 数组包裹在工具调用标记中：")
         lines.append("")
         lines.append("\(TOOL_CALL_START)[{\"name\": \"工具名\", \"arguments\": {参数JSON}}]\(TOOL_CALL_END)")
+        lines.append("")
+        lines.append("方式二（DeepSeek 原生 DSML 标记，与上面二选一即可）：")
+        lines.append("")
+        lines.append("\(DSML_CALLS_OPEN)<|DSML|invoke name=\"工具名\"><|DSML|parameter name=\"参数名\" string=\"true\">参数值<|DSML|parameter><|DSML|invoke><|/DSML|calls>")
         lines.append("")
         lines.append("**规则：**")
         lines.append("")
@@ -111,8 +119,9 @@ enum YaotaiTools {
     }
 
     /// 在累积正文里查找工具调用块；返回 (工具列表, 剥掉工具块后的剩余正文)
-    /// 对应 Rust 的 parse_tool_calls_with
+    /// 对应 Rust 的 parse_tool_calls_with；DSML 为 DeepSeek 网页模型原生格式，优先尝试
     static func parse(_ text: String) -> (calls: [ParsedToolCall], remainder: String)? {
+        if text.contains("<|DSML|"), let dsml = parseDSML(text) { return dsml }
         guard let sRange = text.range(of: TOOL_CALL_START) else { return nil }
         let afterStart = text[sRange.upperBound...]
         // 找第一个 END 标记（END 前的 JSON 数组）
@@ -130,7 +139,86 @@ enum YaotaiTools {
     }
 
     /// 流式中场：只有 START 没有 END —— 告诉调用方"进入工具调用态，正文暂不外发"
-    static func hasStart(_ text: String) -> Bool { text.contains(TOOL_CALL_START) }
+    static func hasStart(_ text: String) -> Bool {
+        text.contains(TOOL_CALL_START) || text.contains("<|DSML|")
+    }
+
+    // MARK: - DSML 解析（DeepSeek 原生工具标记）
+
+    /// 解析 DSML 块：invoke name + parameter string 两种形态
+    /// - string="true" → 参数体是原始字符串，直接用
+    /// - 无/string="false" → 参数体是 JSON 文本，解析失败回落原始字符串
+    private static func parseDSML(_ text: String) -> (calls: [ParsedToolCall], remainder: String)? {
+        guard let ir = try? NSRegularExpression(pattern: "<\\|\\/?DSML\\|invoke\\s+name=\"([^\"]+)\"\\s*>"),
+              let pr = try? NSRegularExpression(pattern: "<\\|\\/?DSML\\|parameter\\s+name=\"([^\"]+)\"(?:\\s+string=\"([^\"]*)\")?\\s*>") else {
+            return nil
+        }
+        let ns = text as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        let invokes = ir.matches(in: text, range: full)
+        guard !invokes.isEmpty else { return nil }
+
+        var calls: [ParsedToolCall] = []
+        var coveredEnd = 0   // 已消费到的字符位置（用于剥除工具块）
+        for (i, im) in invokes.enumerated() {
+            let name = im.range(at: 1)
+            let regionStart = im.range.location + im.range.length
+            let regionEnd = (i + 1 < invokes.count) ? invokes[i + 1].range.location : ns.length
+            guard regionStart <= regionEnd else { continue }
+            let region = ns.substring(with: NSRange(location: regionStart, length: max(0, regionEnd - regionStart)))
+            let args = parseDSMLParams(region, regex: pr)
+            calls.append(ParsedToolCall(id: "call_\(UUID().uuidString.prefix(8))_\(i)",
+                                        name: ns.substring(with: name), arguments: args))
+            coveredEnd = max(coveredEnd, regionEnd)
+        }
+        // 剥除：第一个 DSML 标记之前是正文，块之后（或截断）是尾巴
+        let cutFrom = text.range(of: "<|DSML")?.lowerBound ?? text.startIndex
+        var head = String(text[..<cutFrom])
+        // 关闭标记：最后的 invoke>/calls>（可能带斜杠也可能不带）
+        var tailStart = text.endIndex
+        for closer in ["</|DSML|calls>", "<|/DSML|calls>", "</|DSML|invoke>", "<|/DSML|invoke>", "<|DSML|invoke>", "<|DSML|calls>"] {
+            if let r = text.range(of: closer, options: .backwards), r.upperBound > coveredEnd {
+                tailStart = min(tailStart, r.upperBound)
+            }
+        }
+        var tail = tailStart < text.endIndex ? String(text[tailStart...]) : ""
+        let beforeTrim = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        let afterTrim = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (calls, [beforeTrim, afterTrim].filter { !$0.isEmpty }.joined(separator: "\n"))
+    }
+
+    private static func parseDSMLParams(_ region: String, regex: NSRegularExpression) -> String {
+        let ns = region as NSString
+        let matches = regex.matches(in: region, range: NSRange(location: 0, length: ns.length))
+        var dict: [String: Any] = [:]
+        guard !matches.isEmpty else { return "{}" }
+        for m in matches {
+            let key = ns.substring(with: m.range(at: 1))
+            let r2 = m.range(at: 2)
+            let asString = (r2.location != NSNotFound) ? (ns.substring(with: r2) == "true") : true
+            let bodyStart = m.range.location + m.range.length
+            // 参数体到下一个 parameter 关闭标记（带不带斜杠都认）
+            var bodyEnd = ns.length
+            for closer in ["<|/DSML|parameter>", "</|DSML|parameter>", "<|DSML|parameter>", "<|/DSML|invoke>", "</|DSML|invoke>", "<|DSML|invoke>"] {
+                if let r = region.range(of: closer, options: .literal, range: region.index(region.startIndex, offsetBy: min(bodyStart, ns.length))..<region.endIndex) {
+                    let loc = region.distance(from: region.startIndex, to: r.lowerBound)
+                    bodyEnd = min(bodyEnd, loc)
+                }
+            }
+            guard bodyEnd >= bodyStart else { continue }
+            let raw = ns.substring(with: NSRange(location: bodyStart, length: max(0, bodyEnd - bodyStart)))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if asString {
+                dict[key] = raw
+            } else if let d = raw.data(using: .utf8),
+                      let v = try? JSONSerialization.jsonObject(with: d) {
+                dict[key] = v   // 数字/布尔/对象/数组/JSON 字符串原样进参
+            } else {
+                dict[key] = raw
+            }
+        }
+        return jsonString(dict as Any)
+    }
 
     private static func parseCallArray(_ raw: String) -> [ParsedToolCall] {
         // 容忍模型在数组前后吐了废话：截取第一个 [ 到最后一个 ]
