@@ -9,6 +9,10 @@ struct SettingsView: View {
     @State private var hifOn = DSHif.shared.enabled
     @State private var copied = false
     @AppStorage("jl.officialkey") private var officialKey = ""
+    @AppStorage("jl.ghpat") private var ghPat = ""
+    @State private var ghUser = ""
+    @State private var ghError: String?
+    @State private var ghChecking = false
 
     var body: some View {
         NavigationStack {
@@ -157,6 +161,60 @@ struct SettingsView: View {
                     Text("画中画监控（其他 App / 主屏幕可看）")
                 } footer: {
                     Text("开启后显示实时上下文、本轮输出与字/秒、服务端累计 token 消耗，每秒刷新；可最小化到主屏幕或其他 App 上悬浮查看，点悬浮窗左上角「还原」回到本 App。")
+                }
+
+                Section {
+                    NavigationLink {
+                        PromptEditorView()
+                    } label: {
+                        HStack {
+                            Image(systemName: "text.bubble")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("底层提示词")
+                                Text("AI 助手 / 聊天前缀 / 网关默认系统 / 工具说明，全部可改")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("GitHub PAT（克隆私有仓库用；公开仓库可不填）")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("github_pat_… / ghp_…", text: $ghPat)
+                            .font(.caption)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    HStack {
+                        Text(ghUser.isEmpty ? "PAT 状态未检测" : "已登录：\(ghUser)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button(ghChecking ? "检测中…" : "检测 PAT") {
+                            ghChecking = true
+                            Task {
+                                let r = await GitHubClient.shared.checkLogin()
+                                await MainActor.run {
+                                    ghUser = r.login ?? ""
+                                    ghError = r.error ?? ""
+                                    ghChecking = false
+                                }
+                            }
+                        }
+                        .font(.caption)
+                        .disabled(ghChecking || ghPat.isEmpty)
+                    }
+                    if let ghError, !ghError.isEmpty {
+                        Text(ghError).font(.caption2).foregroundColor(.red)
+                    }
+                    Link("没有 PAT？github.com/settings/tokens 生成（勾 repo 权限）→",
+                         destination: URL(string: "https://github.com/settings/tokens")!)
+                        .font(.caption2)
+                } header: {
+                    Text("瑶台开发环境")
+                } footer: {
+                    Text("瑶台 = 内置 Linux 风格终端 + 沙盒文件系统 + JS 引擎（node）+ git/curl + GitHub + 网页预览，AI 助手可通过工具直接操作这一切（需官方 Key）。")
                 }
 
                 Section {
