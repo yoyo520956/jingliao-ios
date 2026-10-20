@@ -228,6 +228,8 @@ final class LocalAPIServer: ObservableObject {
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
                         case .contentDelta(let t):
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                        case .usage:
+                            break
                         case .meta:
                             break
                         case .done(let fr):
@@ -253,6 +255,7 @@ final class LocalAPIServer: ObservableObject {
                         switch ev {
                         case .thinkDelta(let t): think += t
                         case .contentDelta(let t): content += t
+                        case .usage: break
                         case .meta: break
                         case .done(let fr):
                             if let fr, fr.hasPrefix("error:") { errMsg = String(fr.dropFirst(6)) }
