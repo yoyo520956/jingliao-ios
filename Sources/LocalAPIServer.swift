@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// 本地 OpenAI 兼容 API 网关：127.0.0.1 监听，/v1/models + /v1/chat/completions
+/// 本地 OpenAI 兼容 API 网关：0.0.0.0 监听（回环 + 局域网），/v1/models + /v1/chat/completions
 final class LocalAPIServer: ObservableObject {
     static let shared = LocalAPIServer()
 
@@ -16,6 +16,27 @@ final class LocalAPIServer: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
+    /// 本机局域网 IPv4（en0/en1 优先），拿不到返回 nil
+    static var lanIPv4: String? {
+        var result: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = ptr.pointee
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: ifa.ifa_name)
+            if name != "en0" && name != "en1" { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                let ip = String(cString: host)
+                if ip != "127.0.0.1" { result = ip; break }
+            }
+        }
+        return result
+    }
+
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "jl.localserver")
     private let engine = DSChatEngine.shared
@@ -24,7 +45,8 @@ final class LocalAPIServer: ObservableObject {
         stop()
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        let endpoint = NWEndpoint.Host("127.0.0.1")
+        // 0.0.0.0 = 同听回环与局域网网卡：本机其他 App 连 127.0.0.1 可达，同 Wi-Fi 设备连局域网 IP 也可达
+        let endpoint = NWEndpoint.Host("0.0.0.0")
         guard let p = NWEndpoint.Port(rawValue: port) else { return }
         params.requiredLocalEndpoint = .hostPort(host: endpoint, port: p)
         guard let l = try? NWListener(using: params) else {
@@ -42,7 +64,8 @@ final class LocalAPIServer: ObservableObject {
         }
         l.start(queue: queue)
         listener = l
-        EngineLog.shared.add("本地网关已启动 http://127.0.0.1:\(port)/v1")
+        let lan = Self.lanIPv4.map { " / http://\($0):\(port)/v1（局域网）" } ?? ""
+        EngineLog.shared.add("本地网关已启动 http://127.0.0.1:\(port)/v1\(lan)")
     }
 
     func stop() {
