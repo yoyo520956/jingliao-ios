@@ -42,6 +42,9 @@ struct RootTabView: View {
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
                 .tag(3)
+            WorkbenchView()
+                .tabItem { Label("瑶台", systemImage: "terminal") }
+                .tag(4)
         }
     }
 }
