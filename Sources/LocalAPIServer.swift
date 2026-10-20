@@ -428,7 +428,7 @@ final class LocalAPIServer: ObservableObject {
                     "index": 0, "id": tc.id, "type": "function",
                     "function": ["name": tc.name, "arguments": tc.arguments],
                 ]]]
-                sendRaw(conn, "data: " + chunkJSONRaw(cid, model, delta) + "\n\n")
+                sendRaw(conn, "data: " + chunkJSONRaw(cid, model, delta, nil) + "\n\n")
             }
             EngineLog.shared.add("[网关] 工具调用：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
         }
