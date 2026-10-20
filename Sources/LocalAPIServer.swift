@@ -154,6 +154,8 @@ final class LocalAPIServer: ObservableObject {
     private func dispatch(_ conn: NWConnection, ctx: ConnCtx, body: Data) {
         let path = ctx.path.split(separator: "?").first.map(String.init) ?? ctx.path
         let auth = ctx.headers["authorization"]
+        // 全量入口日志：不管路径对不对，先留痕（排查"请求没到网关"）
+        EngineLog.shared.add("[网关] 收到 \(ctx.method) \(path)（body \(body.count)B）")
         Task { [weak self] in
             guard let self else { return }
             if path == "/v1/models" {
@@ -181,6 +183,24 @@ final class LocalAPIServer: ObservableObject {
         guard !keys.isEmpty else { return true }
         guard let auth, auth.lowercased().hasPrefix("bearer ") else { return false }
         return keys.contains(String(auth.dropFirst(7)).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// 提取最后一条纯用户消息（无系统人设），用于零正文兜底重试
+    static func lastUserText(_ messages: [[String: Any]]) -> String {
+        for m in messages.reversed() {
+            if (m["role"] as? String ?? "user") != "user" { continue }
+            if let c = m["content"] as? String, !c.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return c
+            }
+            if let arr = m["content"] as? [[String: Any]] {
+                let t = arr.compactMap { p -> String? in
+                    if let ty = p["type"] as? String, ty != "text" && ty != "input_text" { return nil }
+                    return p["text"] as? String
+                }.joined(separator: "\n")
+                if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return t }
+            }
+        }
+        return ""
     }
 
     private func chunkJSON(_ id: String, _ model: String, _ delta: [String: String], _ finish: String?) -> String {
@@ -263,6 +283,7 @@ final class LocalAPIServer: ObservableObject {
                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["role": "assistant"], nil) + "\n\n")
                 var gotContent = false
                 var gotAny = false
+                var gotErr = false
                 do {
                     for try await ev in engine.complete(req) {
                         gotAny = true
@@ -278,6 +299,7 @@ final class LocalAPIServer: ObservableObject {
                             break
                         case .done(let fr):
                             if let fr, fr.hasPrefix("error:") {
+                                gotErr = true
                                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
                             }
                             sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
@@ -288,9 +310,43 @@ final class LocalAPIServer: ObservableObject {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
                     sendRaw(conn, "data: [DONE]\n\n")
                 }
-                if !gotContent && !gotAny {
-                    // 上游零事件：给客户端一个显式错误，而不是裸空
-                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
+                if !gotContent && !gotErr {
+                    // 上游零事件：先试裸用户消息重试（疑似人设 prompt 触发内容过滤），再显式报错
+                    let plain = Self.lastUserText(messages)
+                    if !plain.isEmpty && plain != prompt {
+                        EngineLog.shared.add("[网关] 零事件 → 裸用户消息重试（规避人设触发过滤）")
+                        if let sid2 = try? await engine.createSession(account: account) {
+                            let req2 = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sid2, parentMessageID: nil,
+                                prompt: plain, thinking: thinking, search: search, onMeta: nil)
+                            do {
+                                for try await ev in engine.complete(req2) {
+                                    switch ev {
+                                    case .contentDelta(let t):
+                                        gotContent = true
+                                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                                    case .thinkDelta(let t):
+                                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
+                                    case .usage, .meta: break
+                                    case .done(let fr):
+                                        if let fr, fr.hasPrefix("error:") {
+                                            sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
+                                        }
+                                    }
+                                }
+                            } catch {
+                                sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误-重试] " + error.localizedDescription], nil) + "\n\n")
+                            }
+                            await engine.deleteSession(account: account, sessionID: sid2)
+                        }
+                    }
+                    if gotContent {
+                        sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
+                    } else {
+                        // 给客户端一个显式错误，而不是裸空
+                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
+                        sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
+                    }
                     sendRaw(conn, "data: [DONE]\n\n")
                 }
                 EngineLog.shared.add("[网关] 完成 stream=1 content=\(gotContent ? "有" : "无") events=\(gotAny ? "有" : "无")")
@@ -317,13 +373,41 @@ final class LocalAPIServer: ObservableObject {
                     conn.cancel()
                     return
                 }
-                let text = errMsg.isEmpty ? content : content + "\n[上游错误] " + errMsg
+                let text0 = errMsg.isEmpty ? content : content + "\n[上游错误] " + errMsg
+                var text = text0
+                var think2 = think
+                // 非流式零正文兜底：用裸用户消息重试一次（疑似人设 prompt 触发过滤）
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let plain = Self.lastUserText(messages)
+                    if !plain.isEmpty && plain != prompt {
+                        EngineLog.shared.add("[网关] 零正文（非流式）→ 裸用户消息重试")
+                        if let sid2 = try? await engine.createSession(account: account) {
+                            let req2 = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sid2, parentMessageID: nil,
+                                prompt: plain, thinking: thinking, search: search, onMeta: nil)
+                            do {
+                                for try await ev in engine.complete(req2) {
+                                    switch ev {
+                                    case .thinkDelta(let t): think2 += t
+                                    case .contentDelta(let t): text += t
+                                    case .usage, .meta: break
+                                    case .done(let fr):
+                                        if let fr, fr.hasPrefix("error:") { text += "\n[上游错误] " + String(fr.dropFirst(6)) }
+                                    }
+                                }
+                            } catch {
+                                text += "\n[网关错误-重试] " + error.localizedDescription
+                            }
+                            await engine.deleteSession(account: account, sessionID: sid2)
+                        }
+                    }
+                }
                 let obj: [String: Any] = [
                     "id": cid, "object": "chat.completion",
                     "created": Int(Date().timeIntervalSince1970), "model": model,
                     "choices": [[
                         "index": 0,
-                        "message": ["role": "assistant", "content": text, "reasoning_content": think],
+                        "message": ["role": "assistant", "content": text, "reasoning_content": think2],
                         "finish_reason": "stop",
                     ]],
                     "usage": ["prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0],
