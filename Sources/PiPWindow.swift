@@ -15,7 +15,6 @@ final class PiPManager: NSObject, ObservableObject {
     private var controller: AVPictureInPictureController?
     private var hostView: UIView?
     private var timer: Timer?
-    private var audioPlayer: AVAudioPlayer?
 
     private let W = 960
     private let H = 540
@@ -94,8 +93,8 @@ final class PiPManager: NSObject, ObservableObject {
         controller = nil
         hostView?.removeFromSuperview()
         hostView = nil
-        audioPlayer?.stop(); audioPlayer = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        // 网关还在跑就继续保活
+        if !LocalAPIServer.shared.running { SilentAudio.shared.stop() }
         isActive = false
         pipRunning = false
         EngineLog.shared.add("PiP 监控已关闭")
@@ -238,26 +237,7 @@ final class PiPManager: NSObject, ObservableObject {
     // MARK: - 静音音频（保活兜底）
 
     private func startSilentAudio() {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("jl_silence.wav")
-        if !FileManager.default.fileExists(atPath: url.path) { Self.writeSilentWav(to: url) }
-        audioPlayer = try? AVAudioPlayer(contentsOf: url)
-        audioPlayer?.numberOfLoops = -1
-        audioPlayer?.volume = 0.01
-        audioPlayer?.play()
-    }
-
-    private static func writeSilentWav(to url: URL) {
-        let sampleRate = 44100
-        let dataCount = sampleRate * 2 // 1 秒 16bit mono
-        var d = Data()
-        func s(_ x: String) { d.append(x.data(using: .ascii)!) }
-        func u32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
-        func u16(_ v: UInt16) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 2)) }
-        s("RIFF"); u32(UInt32(36 + dataCount)); s("WAVE")
-        s("fmt "); u32(16); u16(1); u16(1); u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 2)); u16(2); u16(16)
-        s("data"); u32(UInt32(dataCount))
-        d.append(Data(count: dataCount))
-        try? d.write(to: url)
+        SilentAudio.shared.start()
     }
 }
 
