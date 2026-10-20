@@ -75,6 +75,7 @@ enum YaotaiTools {
         lines.append("6. 决定调用工具时，输出的第一个非空白字符必须是 \(TOOL_CALL_START)。")
         lines.append("7. 整个响应中只能出现一个 \(TOOL_CALL_START) 块，不要重复输出。")
         lines.append("8. 不要把回复和工具调用放在思考内容（<think> 标签）中。")
+        lines.append("9. 【已收到工具结果】消息里的结果就是上一条工具调用的返回值——基于结果继续，严禁重复调用同一个工具。")
         lines.append("")
 
         // 动态示例
@@ -119,22 +120,37 @@ enum YaotaiTools {
     }
 
     /// 在累积正文里查找工具调用块；返回 (工具列表, 剥掉工具块后的剩余正文)
-    /// 对应 Rust 的 parse_tool_calls_with；DSML 为 DeepSeek 网页模型原生格式，优先尝试
+    /// DSML 为 DeepSeek 网页模型原生格式，优先尝试；JSON 标记支持多块（模型爱分多轮吐）
     static func parse(_ text: String) -> (calls: [ParsedToolCall], remainder: String)? {
         if text.contains("<|DSML|"), let dsml = parseDSML(text) { return dsml }
-        guard let sRange = text.range(of: TOOL_CALL_START) else { return nil }
-        let afterStart = text[sRange.upperBound...]
-        // 找第一个 END 标记（END 前的 JSON 数组）
-        guard let eRange = afterStart.range(of: TOOL_CALL_END) else {
-            // 流式场景：END 还没到，调用方应继续累积
-            return nil
+        guard text.contains(TOOL_CALL_START) else { return nil }
+
+        // 切出所有完整的 START…END 块，逐块解析累加
+        var calls: [ParsedToolCall] = []
+        var remainder = text
+        var searchFrom = remainder.startIndex
+        var idx = 0
+        while let sRange = remainder.range(of: TOOL_CALL_START, range: searchFrom..<remainder.endIndex),
+              let eRange = remainder.range(of: TOOL_CALL_END, range: sRange.upperBound..<remainder.endIndex) {
+            let rawJSON = String(remainder[sRange.upperBound..<eRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            for c in parseCallArray(rawJSON) {
+                var c = c
+                c.id = "call_\(UUID().uuidString.prefix(8))_\(idx)"
+                idx += 1
+                calls.append(c)
+            }
+            // 把整块从正文里抠掉
+            remainder = String(remainder[..<sRange.lowerBound]) + String(remainder[eRange.upperBound...])
+            searchFrom = remainder.startIndex   // 重新从头扫（块已移除，startIndex 就是安全起点）
         }
-        let rawJSON = String(afterStart[..<eRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let calls = parseCallArray(rawJSON)
-        // 剥掉工具块：start 之前 + end 之后
-        let before = String(text[..<sRange.lowerBound])
-        let after = String(text[eRange.upperBound...])
-        let remainder = (before + after).trimmingCharacters(in: .whitespacesAndNewlines)
+        // 兜底：任何漏网的裸标记文字直接抹掉（模型偶尔只吐标记不吐内容）
+        remainder = remainder
+            .replacingOccurrences(of: TOOL_CALL_START, with: "")
+            .replacingOccurrences(of: TOOL_CALL_END, with: "")
+            .replacingOccurrences(of: DSML_CALLS_OPEN, with: "")
+            .replacingOccurrences(of: DSML_INVOKE_OPEN, with: "")
+        remainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
         return (calls, remainder)
     }
 
