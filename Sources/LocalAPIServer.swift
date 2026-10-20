@@ -570,11 +570,11 @@ final class LocalAPIServer: ObservableObject {
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?) async {
-        handleChat(conn, body: body, auth: auth, proto: .openai)
+        await handleChat(conn, body: body, auth: auth, proto: .openai)
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind) async {
-        handleChat(conn, body: body, auth: auth, proto: proto, idemKey: nil)
+        await handleChat(conn, body: body, auth: auth, proto: proto, idemKey: nil)
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind, idemKey: String?) async {
