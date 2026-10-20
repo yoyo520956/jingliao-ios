@@ -192,7 +192,7 @@ final class AgentRunner: ObservableObject {
             conn.stateUpdateHandler = { state in
                 if case .failed(let e) = state {
                     conn.cancel()
-                    finish(.failure(NSError(domain: "Yaotai", code: (e as NSError).code, userInfo: [NSLocalizedDescriptionKey: "连接网关失败：\(e.localizedDescription)"]))
+                    finish(.failure(NSError(domain: "Yaotai", code: (e as NSError).code, userInfo: [NSLocalizedDescriptionKey: "连接网关失败：\(e.localizedDescription)"])))
                 }
             }
             conn.start(queue: q)
