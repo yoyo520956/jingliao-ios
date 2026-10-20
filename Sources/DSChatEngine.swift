@@ -6,6 +6,10 @@ struct PatchState {
     private(set) var sawStatus = false
     private(set) var responseMessageID: Int64 = 0
     private var fragments: [String] = []
+    // p/o 跨帧持久化（原码对齐：后续帧可省略 p/o，沿用上一帧的路径与操作）
+    private var currentPath: String?
+    private var currentOp: String?
+    private var logged = 0
 
     mutating func apply(_ json: [String: Any]) -> [DSEvent] {
         var events: [DSEvent] = []
@@ -18,55 +22,140 @@ struct PatchState {
             return events
         }
 
-        // 形态一：patch 操作 {p, o, v}
-        if let p = json["p"] as? String {
-            let op = json["o"] as? String ?? "SET"
-            let path = p.hasPrefix("/") ? String(p.dropFirst()) : p
-            if op == "APPEND" {
-                if path == "response/fragments" {
-                    if let arr = json["v"] as? [[String: Any]] {
-                        for f in arr { fragments.append(f["type"] as? String ?? "RESPONSE") }
-                    }
-                } else if path.hasPrefix("response/fragments/"), path.hasSuffix("/content") {
-                    if let s = json["v"] as? String {
-                        if fragments.last == "THINK" { events.append(.thinkDelta(s)) }
-                        else { events.append(.contentDelta(s)) }
-                    }
-                }
-            } else { // SET
-                if path == "response/status" {
-                    sawStatus = true
-                    let st = json["v"] as? String ?? ""
-                    if st == "FINISHED" || st == "INCOMPLETE" {
-                        events.append(.done(finishReason: st == "FINISHED" ? "stop" : nil))
-                    }
-                } else if path == "response/fragments" {
-                    if let arr = json["v"] as? [[String: Any]] {
-                        fragments = arr.map { $0["type"] as? String ?? "RESPONSE" }
-                    }
-                }
-                // accumulated_token_usage 等：忽略
-            }
-            return events
-        }
-
-        // 形态二：全量快照 {response: {...}}
-        if let resp = json["response"] as? [String: Any] {
-            if let arr = resp["fragments"] as? [[String: Any]] {
-                fragments = arr.map { $0["type"] as? String ?? "RESPONSE" }
-            }
-            if let st = resp["status"] as? String, st == "FINISHED" || st == "INCOMPLETE" {
-                sawStatus = true
-                events.append(.done(finishReason: st == "FINISHED" ? "stop" : nil))
-            }
-            return events
-        }
-
-        // 形态三：消息 id 元数据
+        // 链路 id 帧（原码：顶层同时带 request_message_id / response_message_id）
         if let rm = (json["response_message_id"] as? NSNumber)?.int64Value {
             responseMessageID = rm
+            return events
+        }
+
+        // 原始帧诊断（前 40 帧：p/o/v 形状摘要）
+        if logged < 40 {
+            logged += 1
+            EngineLog.shared.add("sse#\(logged): \(Self.frameSummary(json))")
+        }
+
+        if let p = json["p"] as? String { currentPath = p }
+        if let o = json["o"] as? String { currentOp = o }
+        let op = currentOp ?? "SET"
+        let rawPath = currentPath ?? ""
+        let path = rawPath.hasPrefix("/") ? String(rawPath.dropFirst()) : rawPath
+
+        guard let v = json["v"] else { return events }
+
+        // 初始快照：无 path 且 v.response 存在
+        if currentPath == nil,
+           let resp = v as? [String: Any], let r = resp["response"] as? [String: Any] {
+            return applySnapshot(r)
+        }
+
+        // BATCH 递归分解（子补丁各自 p/o，路径与父路径拼接）
+        if op == "BATCH", let arr = v as? [[String: Any]] {
+            return applyBatch(parent: path, arr)
+        }
+
+        return applyPath(path, op, v)
+    }
+
+    private mutating func applyBatch(parent: String, _ arr: [[String: Any]]) -> [DSEvent] {
+        var events: [DSEvent] = []
+        var subPath = ""
+        var subOp = "SET"
+        for item in arr {
+            if let p = item["p"] as? String { subPath = p }
+            if let o = item["o"] as? String { subOp = o }
+            guard let v = item["v"] else { continue }
+            let sub = subPath.hasPrefix("/") ? String(subPath.dropFirst()) : subPath
+            let full = parent.isEmpty ? sub : (sub.isEmpty ? parent : parent + "/" + sub)
+            if subOp == "BATCH", let subArr = v as? [[String: Any]] {
+                events.append(contentsOf: applyBatch(parent: full, subArr))
+            } else {
+                events.append(contentsOf: applyPath(full, subOp, v))
+            }
         }
         return events
+    }
+
+    private mutating func applySnapshot(_ r: [String: Any]) -> [DSEvent] {
+        var events: [DSEvent] = []
+        if let st = r["status"] as? String, st == "FINISHED" || st == "INCOMPLETE" {
+            sawStatus = true
+            events.append(.done(finishReason: st == "FINISHED" ? "stop" : nil))
+        }
+        if let arr = r["fragments"] as? [[String: Any]] {
+            fragments = []
+            for f in arr {
+                let ty = f["type"] as? String ?? ""
+                let content = f["content"] as? String ?? ""
+                if !content.isEmpty {
+                    if ty == "THINK" { events.append(.thinkDelta(content)) }
+                    else if ty == "RESPONSE" { events.append(.contentDelta(content)) }
+                }
+                fragments.append(ty)
+            }
+        }
+        return events
+    }
+
+    private mutating func applyPath(_ path: String, _ op: String, _ v: Any) -> [DSEvent] {
+        var events: [DSEvent] = []
+        switch path {
+        case "response/status":
+            if let st = v as? String {
+                sawStatus = true
+                if st == "FINISHED" || st == "INCOMPLETE" {
+                    events.append(.done(finishReason: st == "FINISHED" ? "stop" : nil))
+                }
+            }
+        case "response/fragments/-1/content":
+            if let s = v as? String {
+                let ty = fragments.last ?? ""
+                if ty == "THINK" { events.append(.thinkDelta(s)) }
+                else if ty == "RESPONSE" { events.append(.contentDelta(s)) }
+                else if fragments.isEmpty {
+                    // 原码此处直接丢弃；缺 fragment 元数据时按 RESPONSE 兜底防整段丢失
+                    events.append(.contentDelta(s))
+                }
+            }
+        case "response/fragments":
+            if op == "APPEND", let arr = v as? [[String: Any]] {
+                for f in arr {
+                    let ty = f["type"] as? String ?? ""
+                    let content = f["content"] as? String ?? ""
+                    if !content.isEmpty {
+                        if ty == "THINK" { events.append(.thinkDelta(content)) }
+                        else if ty == "RESPONSE" { events.append(.contentDelta(content)) }
+                    }
+                    fragments.append(ty)
+                }
+            } else if op == "SET", let arr = v as? [[String: Any]] {
+                // SET 全量替换：只更新类型表（正文走快照/APPEND 通道）
+                fragments = arr.map { $0["type"] as? String ?? "" }
+            }
+        default:
+            break
+        }
+        return events
+    }
+
+    static func frameSummary(_ json: [String: Any]) -> String {
+        func kind(_ v: Any) -> String {
+            switch v {
+            case is String: return "str"
+            case is NSNumber: return "num"
+            case is [Any]: return "arr[\((v as! [Any]).count)]"
+            case is [String: Any]: return "obj"
+            default: return "\(Swift.type(of: v))"
+            }
+        }
+        var parts: [String] = []
+        if let p = json["p"] as? String { parts.append("p=\(p)") }
+        if let o = json["o"] as? String { parts.append("o=\(o)") }
+        if let v = json["v"] { parts.append("v=\(kind(v))") }
+        if json["p"] == nil && json["v"] == nil {
+            parts.append("keys=\(json.keys.prefix(4).joined(separator: ","))")
+        }
+        let s = parts.joined(separator: " ")
+        return s.count > 120 ? String(s.prefix(120)) : s
     }
 }
 
