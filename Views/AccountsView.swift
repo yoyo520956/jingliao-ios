@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// 账号页——微信 8.0.79 风格：灰底圆角白卡 + 状态胶囊 + 图标行操作
 struct AccountsView: View {
     @EnvironmentObject var store: DSAccountStore
     @State private var showAdd = false
@@ -8,59 +9,57 @@ struct AccountsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ForEach(store.accounts) { a in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(a.display).fontWeight(.medium)
+            ScrollView {
+                VStack(spacing: 0) {
+                    Text("DeepSeek 账号池（空闲最久优先）")
+                        .font(.system(size: 13))
+                        .foregroundColor(WX.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+                    WXGroup {
+                        if store.accounts.isEmpty {
+                            HStack(spacing: 10) {
+                                WXRowIcon(name: "ic_server_stack")
+                                Text("还没有账号，点下面「添加账号」")
+                                    .font(.system(size: 17))
+                                    .foregroundColor(WX.titleBlack)
                                 Spacer()
-                                Text(a.statusText)
-                                    .font(.caption2)
-                                    .foregroundColor(Color.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(Capsule().fill(chipColor(a)))
                             }
-                            Text("device_id: " + a.deviceID)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .textSelection(.enabled)
-                            HStack {
-                                if busyID == a.id {
-                                    ProgressView().scaleEffect(0.7)
-                                } else if a.token.isEmpty {
-                                    Button("登录") { Task { await login(a) } }
-                                        .buttonStyle(.bordered)
-                                        .font(.caption)
-                                        .disabled(a.password.isEmpty)
-                                } else {
-                                    Button("重新抓取登录态") { recaptureTarget = a }
-                                        .buttonStyle(.bordered)
-                                        .font(.caption)
-                                }
-                                Button("删除", role: .destructive) { store.remove(a.id) }
-                                    .buttonStyle(.bordered)
-                                    .font(.caption)
+                            .frame(height: 54)
+                            .padding(.horizontal, 15)
+                        }
+                        ForEach(Array(store.accounts.enumerated()), id: \.element.id) { i, a in
+                            accountRow(a, index: i, count: store.accounts.count)
+                        }
+                    }
+                    WXGroup {
+                        Button {
+                            showAdd = true
+                        } label: {
+                            WX.rowContent {
+                                WXRowIcon(name: "ic_add_user")
+                                Text("添加账号")
+                                    .font(.system(size: 17))
+                                    .foregroundColor(WX.titleBlack)
                             }
                         }
-                        .padding(.vertical, 2)
+                        .buttonStyle(.plain)
                     }
-                } header: {
-                    Text("DeepSeek 账号池（空闲最久优先）")
-                } footer: {
-                    Text("建议使用小号。device_id 必须来自真实浏览器登录——点「抓取」在内置浏览器登录一次自动提取；伪造值会触发 RISK_DEVICE_DETECTED。")
+                    Text("device_id 必须来自真实浏览器登录——点「抓取」在内置浏览器登录一次自动提取；伪造值会触发风控。建议使用小号。")
+                        .font(.system(size: 12))
+                        .foregroundColor(WX.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
                 }
-                Section {
-                    Button {
-                        showAdd = true
-                    } label: {
-                        Label("添加账号", systemImage: "plus.circle")
-                    }
-                }
+                .padding(.bottom, 16)
             }
+            .background(WX.listBG)
+            .scrollContentBackground(.hidden)
             .navigationTitle("账号")
+            .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showAdd) { AddAccountSheet() }
             .sheet(item: $recaptureTarget) { target in
                 RecaptureSheet(account: target) { dev, tok, uid in
@@ -77,10 +76,63 @@ struct AccountsView: View {
         }
     }
 
+    @ViewBuilder
+    private func accountRow(_ a: DSAccount, index: Int, count: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(a.display).font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                Spacer()
+                Text(a.statusText)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(chipColor(a)))
+            }
+            Text("device_id: " + a.deviceID)
+                .font(.system(size: 11))
+                .foregroundColor(WX.secondary)
+                .lineLimit(1)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                if busyID == a.id {
+                    ProgressView().scaleEffect(0.7)
+                } else if a.token.isEmpty {
+                    Button("登录") { Task { await login(a) } }
+                        .font(.system(size: 14))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(WX.green))
+                        .disabled(a.password.isEmpty)
+                } else {
+                    Button("重新抓取登录态") { recaptureTarget = a }
+                        .font(.system(size: 14))
+                        .foregroundColor(WX.green)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Capsule().stroke(WX.green, lineWidth: 1))
+                }
+                Spacer()
+                Button("删除") { store.remove(a.id) }
+                    .font(.system(size: 14))
+                    .foregroundColor(WX.badgeRed)
+            }
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) {
+            if index < count - 1 {
+                Rectangle().fill(WX.separator).frame(height: 0.5)
+                    .padding(.leading, 54)
+            }
+        }
+    }
+
     private func chipColor(_ a: DSAccount) -> Color {
-        if a.token.isEmpty { return Color.gray }
+        if a.token.isEmpty { return WX.secondary }
         if a.muted { return Color.orange }
-        return Color.green
+        return WX.green
     }
 
     private func login(_ a: DSAccount) async {
@@ -150,7 +202,7 @@ struct AddAccountSheet: View {
                     HStack {
                         Text(token.isEmpty ? "未导入" : "已抓到登录态 ✓")
                             .font(.caption)
-                            .foregroundColor(token.isEmpty ? Color.secondary : Color.green)
+                            .foregroundColor(token.isEmpty ? WX.secondary : WX.green)
                         Spacer()
                         Button(token.isEmpty ? "去登录抓取" : "重新抓取") { showCapture = true }
                             .buttonStyle(.bordered)
