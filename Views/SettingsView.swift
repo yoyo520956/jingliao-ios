@@ -30,6 +30,44 @@ struct SettingsView: View {
                         ))
                         .labelsHidden()
                     }
+                    if server.running {
+                        // 本机其他 App（走回环）+ 同 Wi-Fi 设备（走局域网 IP）都可调
+                        HStack {
+                            Text("本机地址")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("http://127.0.0.1:\(server.port)/v1")
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.6)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            UIPasteboard.general.string = "http://127.0.0.1:\(server.port)/v1"
+                            copied = true
+                        }
+                        if let lan = LocalAPIServer.lanIPv4 {
+                            HStack {
+                                Text("局域网地址")
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("http://\(lan):\(server.port)/v1")
+                                    .font(.caption.monospaced())
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.6)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                UIPasteboard.general.string = "http://\(lan):\(server.port)/v1"
+                                copied = true
+                            }
+                        }
+                        if copied {
+                            Text("已复制 ✓（Base URL 填这个，模型 deepseek-chat）")
+                                .font(.caption2)
+                                .foregroundColor(.green)
+                        }
+                    }
                     HStack {
                         Text("端口")
                         Spacer()
@@ -48,9 +86,9 @@ struct SettingsView: View {
                             .autocorrectionDisabled()
                     }
                 } header: {
-                    Text("本地网关（给 Minis 等 OpenAI 兼容客户端用）")
+                    Text("本地网关（OpenAI / ChatGPT 官方格式）")
                 } footer: {
-                    Text("在 Minis 里添加自定义模型：Base URL 填 http://127.0.0.1:\(port)/v1，Key 填上面任意一个（若已设置）。模型选 deepseek-chat。")
+                    Text("在 Minis 等 OpenAI 兼容客户端里添加自定义模型：Base URL 填上面的地址（本机其他 App 用 127.0.0.1；同一 Wi-Fi 下的其他设备用局域网地址），Key 填上面任意一个（若已设置）。模型选 deepseek-chat。支持流式。")
                 }
 
                 Section {
