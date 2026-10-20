@@ -54,7 +54,24 @@ final class LocalAPIServer: ObservableObject {
     private var chains: [String: ConvChain] = [:]
     private let chainLock = NSLock()
     private var chainsLoaded = false
+    /// 幂等重放缓存（Idempotency-Key → 上次响应体，10 分钟有效，最多 100 条）
+    private var idemCache: [String: (resp: Data, at: Date)] = [:]
+    private let idemLock = NSLock()
     private final class MsgBox { var msgID: Int64 = 0; var usage: Int64 = 0 }
+
+    private func idempotencyGet(_ key: String) -> Data? {
+        idemLock.lock(); defer { idemLock.unlock() }
+        idemCache = idemCache.filter { Date().timeIntervalSince($0.value.at) < 600 }
+        return idemCache[key]?.resp
+    }
+
+    private func idempotencyReplay(_ key: String) -> Data? { idempotencyGet(key) }
+
+    private func idempotencyStore(_ key: String, _ body: Data) {
+        idemLock.lock(); defer { idemLock.unlock() }
+        if idemCache.count > 100 { idemCache.removeAll() }
+        idemCache[key] = (body, Date())
+    }
 
     private func loadChains() {
         guard !chainsLoaded else { return }
@@ -326,6 +343,17 @@ final class LocalAPIServer: ObservableObject {
         let auth = ctx.headers["authorization"]
         // 全量入口日志：不管路径对不对，先留痕（排查"请求没到网关"）
         EngineLog.shared.add("[网关] 收到 \(ctx.method) \(path)（body \(body.count)B）")
+
+        // ── 幂等重放：带 Idempotency-Key 的请求，同 key 直接回放上次响应 ──
+        if let idemKey = ctx.headers["idempotency-key"], !idemKey.isEmpty {
+            if let replay = idempotencyReplay(idemKey) {
+                EngineLog.shared.add("[网关] 幂等命中 key=\(idemKey.prefix(8)) → 回放 \(replay.count)B")
+                sendRaw(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(replay.count)\r\nConnection: close\r\nidempotent-replayed: true\r\n\r\n")
+                sendAllThenClose(conn, [replay])
+                return
+            }
+        }
+
         Task { [weak self] in
             guard let self else { return }
             if path == "/v1/models" {
@@ -339,14 +367,25 @@ final class LocalAPIServer: ObservableObject {
                 conn.cancel()
                 return
             }
-            guard path == "/v1/chat/completions" else {
+            // 三协议入口：OpenAI / Anthropic Messages / OpenAI Responses
+            let proto: LocalAPIServer.ProtoKind
+            if path == "/v1/chat/completions" { proto = .openai }
+            else if path == "/anthropic/v1/messages" || path == "/v1/messages" { proto = .anthropic }
+            else if path == "/v1/responses" { proto = .responses }
+            else {
                 self.sendErr(conn, status: "404 Not Found", msg: "unknown path \(path)")
                 conn.cancel()
                 return
             }
-            await self.handleChat(conn, body: body, auth: auth)
+            await self.handleChat(conn, body: body, auth: auth, proto: proto, idemKey: ctx.headers["idempotency-key"])
         }
     }
+
+    /// 当前连接的幂等 key（仅用于缓存回写；并发下最差不缓存，不影响正确性）
+    private var currentIdemKey: String?
+
+    /// 请求协议类型（用于 body 转换）
+    private enum ProtoKind { case openai, anthropic, responses }
 
     private func checkAuth(_ auth: String?) -> Bool {
         let keys = apiKeys
@@ -426,7 +465,7 @@ final class LocalAPIServer: ObservableObject {
             for tc in parsed.calls {
                 let delta: [String: Any] = ["tool_calls": [[
                     "index": 0, "id": tc.id, "type": "function",
-                    "function": ["name": tc.name, "arguments": tc.arguments],
+                    "function": ["name": tc.name, "arguments": ProtoAdapter.coerceArguments(tc.arguments)],
                 ]]]
                 sendRaw(conn, "data: " + chunkJSONRaw(cid, model, delta, nil) + "\n\n")
             }
@@ -531,15 +570,32 @@ final class LocalAPIServer: ObservableObject {
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?) async {
+        handleChat(conn, body: body, auth: auth, proto: .openai)
+    }
+
+    private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind) async {
+        handleChat(conn, body: body, auth: auth, proto: proto, idemKey: nil)
+    }
+
+    private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind, idemKey: String?) async {
+        currentIdemKey = idemKey
         guard checkAuth(auth) else {
             sendErr(conn, status: "401 Unauthorized", msg: "无效 API Key")
             conn.cancel()
             return
         }
-        guard let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
+        guard var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
             sendErr(conn, status: "400 Bad Request", msg: "请求体不是 JSON")
             conn.cancel()
             return
+        }
+        // Anthropic Messages 协议 → OpenAI 格式（下游统一走 chat/completions）
+        if proto == .anthropic {
+            json = ProtoAdapter.anthropicToOpenAI(json)
+        }
+        // OpenAI Responses 协议 → Chat Completions
+        if proto == .responses {
+            json = ProtoAdapter.responsesToOpenAI(json)
         }
         // 官方 API 直通模式：填了官方 Key 就走官方通道——工具调用/深度思考/真实 token 用量全支持
         if let officialKey = UserDefaults.standard.string(forKey: "jl.officialkey"), !officialKey.isEmpty {
@@ -745,7 +801,7 @@ final class LocalAPIServer: ObservableObject {
                 if !toolDefs.isEmpty, let parsed = YaotaiTools.parse(text) {
                     toolCallsJSON = parsed.calls.map { tc in
                         ["id": tc.id, "type": "function",
-                         "function": ["name": tc.name, "arguments": tc.arguments]]
+                         "function": ["name": tc.name, "arguments": ProtoAdapter.coerceArguments(tc.arguments)]]
                     }
                     text = parsed.remainder
                     EngineLog.shared.add("[网关] 工具调用（非流式）：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
@@ -767,7 +823,16 @@ final class LocalAPIServer: ObservableObject {
                         "total_tokens": max(1, fullPrompt.count / 2) + Int(box.usage),
                     ],
                 ]
-                sendJSON(conn, obj)
+                // Anthropic 协议：响应转成 Messages 格式后只发一份
+                if proto == .anthropic {
+                    sendJSON(conn, ProtoAdapter.openAIToAnthropic(obj, model: model))
+                } else {
+                    sendJSON(conn, obj)
+                }
+                // 幂等缓存：带 Idempotency-Key 的请求存响应，重试原样回放
+                if let idem = currentIdemKey, let d = (try? JSONSerialization.data(withJSONObject: obj)) {
+                    idempotencyStore(idem, d)
+                }
                 EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count) tokens=\(box.usage)")
                 if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     saveChain(activeSid)
