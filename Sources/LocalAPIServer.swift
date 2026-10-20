@@ -223,18 +223,33 @@ final class LocalAPIServer: ObservableObject {
             var content = ""
             if let c = m["content"] as? String { content = c }
             else if let arr = m["content"] as? [[String: Any]] {
-                content = arr.compactMap { ($0["type"] as? String) == "text" ? ($0["text"] as? String) : nil }
-                    .joined(separator: "\n")
+                // 兼容三种 part：{"type":"text"/"input_text","text":...} 与无 type 的 {"text":...}
+                content = arr.compactMap { p -> String? in
+                    if let t = p["type"] as? String, t != "text" && t != "input_text" { return nil }
+                    return p["text"] as? String
+                }.joined(separator: "\n")
+            }
+            if content.isEmpty, let c = m["content"] as? [[String: Any]] {
+                // 兜底：整体当 JSON 序列化用（防新格式整段丢失）
+                content = (try? JSONSerialization.data(withJSONObject: c))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
             }
             let tag = role == "assistant" ? "助手" : (role == "system" ? "系统" : "用户")
             parts.append("[\(tag)] \(content)")
         }
-        let prompt = parts.joined(separator: "\n\n")
+        var prompt = parts.joined(separator: "\n\n")
+        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let last = messages.last {
+            // 兜底：消息全空时用最后一条原文
+            prompt = "\(last)"
+        }
         let stream = (json["stream"] as? Bool) ?? false
         let thinking = (json["thinking_enabled"] as? Bool) ?? false
         let search = (json["search_enabled"] as? Bool) ?? false
 
         let engine = DSChatEngine.shared
+        // ── 请求诊断日志（设置页可见）──
+        EngineLog.shared.add("[网关] 请求 model=\(json["model"] as? String ?? "deepseek-chat") stream=\(stream) msgs=\(messages.count) promptLen=\(prompt.count) head=\(String(prompt.prefix(60)).replacingOccurrences(of: "\n", with: "⏎"))")
+
         do {
             let sessionID = try await engine.createSession(account: account)
             let req = DSChatEngine.CompleteRequest(
@@ -244,12 +259,18 @@ final class LocalAPIServer: ObservableObject {
             let cid = "chatcmpl-" + String(UUID().uuidString.prefix(8))
             if stream {
                 sendHead(conn, contentType: "text/event-stream")
+                // 首字节立刻发 role 增量，避免客户端的首包超时判定为空
+                sendRaw(conn, "data: " + chunkJSON(cid, model, ["role": "assistant"], nil) + "\n\n")
+                var gotContent = false
+                var gotAny = false
                 do {
                     for try await ev in engine.complete(req) {
+                        gotAny = true
                         switch ev {
                         case .thinkDelta(let t):
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
                         case .contentDelta(let t):
+                            gotContent = true
                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
                         case .usage:
                             break
@@ -267,6 +288,12 @@ final class LocalAPIServer: ObservableObject {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
                     sendRaw(conn, "data: [DONE]\n\n")
                 }
+                if !gotContent && !gotAny {
+                    // 上游零事件：给客户端一个显式错误，而不是裸空
+                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
+                    sendRaw(conn, "data: [DONE]\n\n")
+                }
+                EngineLog.shared.add("[网关] 完成 stream=1 content=\(gotContent ? "有" : "无") events=\(gotAny ? "有" : "无")")
                 await engine.deleteSession(account: account, sessionID: sessionID)
                 conn.cancel()
             } else {
@@ -302,6 +329,7 @@ final class LocalAPIServer: ObservableObject {
                     "usage": ["prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0],
                 ]
                 sendJSON(conn, obj)
+                EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count)")
                 await engine.deleteSession(account: account, sessionID: sessionID)
                 conn.cancel()
             }
