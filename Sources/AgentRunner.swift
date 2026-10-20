@@ -22,9 +22,17 @@ final class AgentRunner: ObservableObject {
     private let shell = ShellEngine.shared
     private let maxRounds = 8
 
+    /// 是否可用：官方 Key（直通）或免费账号（网页协议工具降级）任一在就行
     var ready: Bool {
-        let k = UserDefaults.standard.string(forKey: "jl.officialkey") ?? ""
-        return !k.isEmpty
+        !(UserDefaults.standard.string(forKey: "jl.officialkey") ?? "").isEmpty
+            || DSAccountStore.shared.pickAvailable() != nil
+    }
+
+    /// 当前通道描述（界面显示用）
+    var modeText: String {
+        (UserDefaults.standard.string(forKey: "jl.officialkey") ?? "").isEmpty
+            ? "网页协议 · 工具降级模式"
+            : "官方 API 直通"
     }
 
     func toolsSchema() -> [[String: Any]] { [
@@ -72,7 +80,93 @@ final class AgentRunner: ObservableObject {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         messages.append(Msg(role: "user", text: text))
         busy = true
-        Task { await runLoop() }
+        // 没填官方 Key → 走网页协议工具降级（本地网关负责注入/解析）
+        if (UserDefaults.standard.string(forKey: "jl.officialkey") ?? "").isEmpty {
+            Task { await runWebProtocol() }
+        } else {
+            Task { await runLoop() }
+        }
+    }
+
+    // MARK: - 网页协议工具降级（过本地网关）
+
+    private func runWebProtocol() async {
+        status = "思考中（网页协议工具模式）…"
+        var wire: [[String: Any]] = [["role": "system", "content": PromptStore.shared.agentSystem]]
+        for m in messages {
+            var d: [String: Any] = ["role": m.role, "content": m.text]
+            if !m.toolCalls.isEmpty { d["tool_calls"] = m.toolCalls }
+            if m.role == "tool" {
+                d["tool_call_id"] = (m.toolCalls.first?["id"] as? String) ?? "call_0"
+            }
+            wire.append(d)
+        }
+        await webRound(wire)
+    }
+
+    private func webRound(_ wire: [[String: Any]]) async {
+        let body: [String: Any] = [
+            "model": "deepseek-chat", "messages": wire,
+            "tools": toolsSchema(), "tool_choice": "auto", "stream": false,
+        ]
+        guard let url = URL(string: "http://127.0.0.1:\(LocalAPIServer.shared.port)/v1/chat/completions"),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else {
+            await finish("网关地址无效"); return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = payload
+        req.timeoutInterval = 180
+        status = "思考中…"
+        do {
+            let (d, _) = try await URLSession.shared.data(for: req)
+            let json = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
+            if let e = json["error"] as? [String: Any], let m = e["message"] as? String {
+                await finish(m); return
+            }
+            let msg = ((json["choices"] as? [[String: Any]])?.first)?["message"] as? [String: Any] ?? [:]
+            let text = msg["content"] as? String ?? ""
+            let calls = msg["tool_calls"] as? [[String: Any]] ?? []
+            await MainActor.run {
+                var m = Msg(role: "assistant", text: text)
+                if !calls.isEmpty { m.running = true; m.toolCalls = calls }
+                messages.append(m)
+            }
+            if calls.isEmpty { await finish(nil); return }
+            // 逐个执行工具
+            var toolWire: [[String: Any]] = wire
+            for tc in calls {
+                let fn = tc["function"] as? [String: Any] ?? [:]
+                let name = fn["name"] as? String ?? ""
+                let args = (try? JSONSerialization.jsonObject(with: Data((fn["arguments"] as? String ?? "{}").utf8)))
+                    as? [String: Any] ?? [:]
+                status = "执行工具 \(name) …"
+                let result = execute(name, args)
+                await MainActor.run {
+                    messages.append(Msg(role: "tool", text: result))
+                    if let i = messages.indices.last(where: { messages[$0].running }) {
+                        messages[i].toolResults.append((name, result))
+                        messages[i].running = false
+                    }
+                }
+                // assistant 的 tool_calls 原样带回（OpenAI 协议要求 tool 消息紧跟带 tool_calls 的 assistant）
+                toolWire.append(["role": "assistant", "content": text.isEmpty ? " " : text, "tool_calls": calls])
+                toolWire.append(["role": "tool", "tool_call_id": (tc["id"] as? String) ?? "call_0", "content": result])
+            }
+            status = ""
+            await webRound(toolWire)
+        } catch {
+            await finish("请求网关失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func finish(_ text: String?) async {
+        await MainActor.run {
+            if let text { messages.append(Msg(role: "assistant", text: "⚠️ \(text)")) }
+            busy = false
+            status = ""
+        }
     }
 
     private func runLoop() async {
