@@ -102,11 +102,17 @@ final class LocalAPIServer: ObservableObject {
         return ""
     }
 
-    /// 对话身份键：系统人设头部 + 第一条用户消息头部（同一对话跨轮稳定；新对话开场不同则分开）
+    /// 对话身份键：系统人设头部 + 第一条用户消息**全文**（同一对话跨轮稳定；新对话开场不同则分开）
     static func conversationKey(_ messages: [[String: Any]]) -> String {
         let sys = messages.first(where: { ($0["role"] as? String) == "system" }).map { msgText($0) } ?? ""
         let firstUser = messages.first(where: { ($0["role"] as? String) == "user" }).map { msgText($0) } ?? ""
-        return String(sys.prefix(120)) + "\u{1}" + String(firstUser.prefix(300))
+        return String(sys.prefix(120)) + "\u{1}" + firstUser
+    }
+
+    /// 请求里是否带助手/工具历史：Minis 等客户端每轮发全量历史（msgs 4→6→8 递增），
+    /// 真·新对话的首轮必然一条都没有。这是区分"同人设同开场白的新对话"与"续轮"的唯一可靠判据
+    static func hasAssistantHistory(_ messages: [[String: Any]]) -> Bool {
+        messages.contains { let r = $0["role"] as? String ?? ""; return r == "assistant" || r == "tool" }
     }
 
     /// 按 [系统]/[用户]/[助手]/[工具] 标签拼完整 prompt
@@ -652,6 +658,13 @@ final class LocalAPIServer: ObservableObject {
         }
         chains = chains.filter { $0.value.usedAt > Date().addingTimeInterval(-12 * 3600) }
         var reuse = chains[key]
+        // ── 防串话铁律：同 key 但本请求零助手历史 = 新开对话 ──
+        // 场景：同一个人设 + 相同开场白 → key 撞车，若放行就会并进上一个（通常是第一个）对话
+        if let e = reuse, !Self.hasAssistantHistory(messages), e.msgCount >= 2 {
+            reuse = nil
+            chains.removeValue(forKey: key)
+            EngineLog.shared.add("[网关] 同 key 但无助手历史 → 判定新对话，不复用旧会话（防串话）")
+        }
         if let e = reuse {
             let grow = messages.count > e.msgCount
             let sameTurn = messages.count == e.msgCount && e.lastUser == lastUser
