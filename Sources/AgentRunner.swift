@@ -411,7 +411,7 @@ final class AgentRunner: ObservableObject {
             }
             guard let h = try? FileHandle(forWritingTo: u) else { return "打开文件失败" }
             defer { try? h.close() }
-            h.seekToEnd()
+            try? h.seekToEnd()
             h.write(Data(c.utf8))
             return "已追加 \(c.utf8.count) 字节到 \(fs.display(u))"
         case "http_fetch":
