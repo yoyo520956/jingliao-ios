@@ -183,10 +183,22 @@ final class LocalAPIServer: ObservableObject {
         sendRaw(conn, "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nConnection: close\r\nCache-Control: no-cache\r\n\r\n")
     }
 
+    /// 顺序冲刷所有数据块，最后一块真正写出去后再关闭连接
+    /// （NWConnection.cancel 会丢弃排队中未送达的发送——直接 cancel 会让客户端收不到 [DONE]/响应体）
+    private func sendAllThenClose(_ conn: NWConnection, _ chunks: [Data]) {
+        var i = 0
+        func step() {
+            if i >= chunks.count { conn.cancel(); return }
+            let c = chunks[i]; i += 1
+            conn.send(content: c, completion: .contentProcessed { _ in step() })
+        }
+        step()
+    }
+
     private func sendJSON(_ conn: NWConnection, status: String = "200 OK", _ obj: [String: Any]) {
         let d = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
-        sendRaw(conn, "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(d.count)\r\nConnection: close\r\n\r\n")
-        send(conn, d)
+        let head = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(d.count)\r\nConnection: close\r\n\r\n"
+        sendAllThenClose(conn, [Data(head.utf8), d])
     }
 
     private func sendErr(_ conn: NWConnection, status: String, msg: String) {
@@ -195,7 +207,13 @@ final class LocalAPIServer: ObservableObject {
     // ── 路由 ─────────────────────────────────────────────────────────
 
     private func dispatch(_ conn: NWConnection, ctx: ConnCtx, body: Data) {
-        let path = ctx.path.split(separator: "?").first.map(String.init) ?? ctx.path
+        var path = ctx.path.split(separator: "?").first.map(String.init) ?? ctx.path
+        // Minis 默认会把 /v1 追加到 Base URL 后面；用户若已填 /v1 会变成 /v1/v1/...
+        // 两种错法都归一化到 /v1/...，避免 404
+        if path.hasPrefix("/v1/v1/") { path = String(path.dropFirst(3)) }
+        if !path.hasPrefix("/v1/"), path.hasPrefix("/chat/") || path == "/models" {
+            path = "/v1" + path
+        }
         let auth = ctx.headers["authorization"]
         // 全量入口日志：不管路径对不对，先留痕（排查"请求没到网关"）
         EngineLog.shared.add("[网关] 收到 \(ctx.method) \(path)（body \(body.count)B）")
@@ -348,19 +366,17 @@ final class LocalAPIServer: ObservableObject {
                                 gotErr = true
                                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
                             }
-                            sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
-                            sendRaw(conn, "data: [DONE]\n\n")
                         }
                     }
                 } catch {
+                    gotErr = true
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
-                    sendRaw(conn, "data: [DONE]\n\n")
                 }
                 if !gotContent && !gotErr {
-                    // 上游零事件：先试裸用户消息重试（疑似人设 prompt 触发内容过滤），再显式报错
+                    // 上游零正文：先试裸用户消息重试（疑似人设 prompt 触发内容过滤），再显式报错
                     let plain = Self.lastUserText(messages)
                     if !plain.isEmpty && plain != prompt {
-                        EngineLog.shared.add("[网关] 零事件 → 裸用户消息重试（规避人设触发过滤）")
+                        EngineLog.shared.add("[网关] 零正文 → 裸用户消息重试（规避人设触发过滤）")
                         if let sid2 = try? await engine.createSession(account: account) {
                             let req2 = DSChatEngine.CompleteRequest(
                                 account: account, sessionID: sid2, parentMessageID: nil,
@@ -376,28 +392,30 @@ final class LocalAPIServer: ObservableObject {
                                     case .usage, .meta: break
                                     case .done(let fr):
                                         if let fr, fr.hasPrefix("error:") {
+                                            gotErr = true
                                             sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
                                         }
                                     }
                                 }
                             } catch {
+                                gotErr = true
                                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误-重试] " + error.localizedDescription], nil) + "\n\n")
                             }
                             await engine.deleteSession(account: account, sessionID: sid2)
                         }
                     }
-                    if gotContent {
-                        sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
-                    } else {
-                        // 给客户端一个显式错误，而不是裸空
+                    if !gotContent && !gotErr {
+                        // 给客户端一段可见文本，而不是裸空（否则 Minis 判 empty response）
                         sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
-                        sendRaw(conn, "data: " + chunkJSON(cid, model, [:], "stop") + "\n\n")
                     }
-                    sendRaw(conn, "data: [DONE]\n\n")
                 }
                 EngineLog.shared.add("[网关] 完成 stream=1 content=\(gotContent ? "有" : "无") events=\(gotAny ? "有" : "无")")
-                await engine.deleteSession(account: account, sessionID: sessionID)
-                conn.cancel()
+                // 统一收尾：先冲刷 stop + [DONE]，再真正关闭（防 cancel 丢数据）
+                let tail: [Data] = [
+                    Data(("data: " + chunkJSON(cid, model, [:], "stop") + "\n\n").utf8),
+                    Data("data: [DONE]\n\n".utf8),
+                ]
+                sendAllThenClose(conn, tail)
             } else {
                 var content = ""
                 var think = ""
