@@ -93,6 +93,9 @@ struct PatchState {
                 fragments.append(ty)
             }
         }
+        if let u = (r["accumulated_token_usage"] as? NSNumber)?.int64Value {
+            events.append(.usage(u))
+        }
         return events
     }
 
@@ -105,6 +108,10 @@ struct PatchState {
                 if st == "FINISHED" || st == "INCOMPLETE" {
                     events.append(.done(finishReason: st == "FINISHED" ? "stop" : nil))
                 }
+            }
+        case "response/accumulated_token_usage", "accumulated_token_usage":
+            if let n = (v as? NSNumber)?.int64Value {
+                events.append(.usage(n))
             }
         case "response/fragments/-1/content":
             if let s = v as? String {
