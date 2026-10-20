@@ -366,9 +366,12 @@ final class LocalAPIServer: ObservableObject {
     }
 
     private func chunkJSON(_ id: String, _ model: String, _ delta: [String: String], _ finish: String?) -> String {
-        var d: [String: Any] = [:]
-        for (k, v) in delta { d[k] = v }
-        var choice: [String: Any] = ["index": 0, "delta": d]
+        chunkJSONRaw(id, model, delta.isEmpty ? [:] : delta, finish)
+    }
+
+    /// 通用版：delta 值可以是嵌套结构（tool_calls 数组）
+    private func chunkJSONRaw(_ id: String, _ model: String, _ delta: [String: Any], _ finish: String?) -> String {
+        var choice: [String: Any] = ["index": 0, "delta": delta]
         if let finish { choice["finish_reason"] = finish }
         let obj: [String: Any] = [
             "id": id, "object": "chat.completion.chunk",
@@ -386,12 +389,18 @@ final class LocalAPIServer: ObservableObject {
         _ box: MsgBox? = nil
     ) async -> (content: Bool, err: Bool) {
         var gotContent = false, gotErr = false
+        var visibleText = ""
+        var toolStartSeen = false
         do {
             for try await ev in engine.complete(req) {
                 switch ev {
                 case .contentDelta(let t):
-                    gotContent = true
-                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                    visibleText += t
+                    if YaotaiTools.hasStart(visibleText) { toolStartSeen = true }
+                    if !toolStartSeen {
+                        gotContent = true
+                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                    }
                 case .thinkDelta(let t):
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
                 case .usage(let u):
@@ -408,6 +417,20 @@ final class LocalAPIServer: ObservableObject {
         } catch {
             gotErr = true
             sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
+        }
+        // 流式工具调用：END 到齐后解析，以标准 OpenAI tool_calls chunk 下发
+        if toolStartSeen, let parsed = YaotaiTools.parse(visibleText) {
+            if !parsed.remainder.isEmpty {
+                sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n" + parsed.remainder], nil) + "\n\n")
+            }
+            for tc in parsed.calls {
+                let delta: [String: Any] = ["tool_calls": [[
+                    "index": 0, "id": tc.id, "type": "function",
+                    "function": ["name": tc.name, "arguments": tc.arguments],
+                ]]]
+                sendRaw(conn, "data: " + chunkJSONRaw(cid, model, delta) + "\n\n")
+            }
+            EngineLog.shared.add("[网关] 工具调用：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
         }
         _ = sid
         return (gotContent, gotErr)
@@ -551,6 +574,18 @@ final class LocalAPIServer: ObservableObject {
         if fullPrompt.count > 20_000 {
             EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 2 万 → 智能裁剪（人设头尾+首轮+最近 4 条）")
             fullPrompt = Self.compactPrompt(fullSource)
+        }
+
+        // ── 工具调用（网页版协议上的 function calling）──
+        // 有 tools 就注入调用指令（含格式规则/示例/工具定义）；tool 结果消息也编进 prompt
+        let toolDefs = YaotaiTools.extractToolDefs(json)
+        if !toolDefs.isEmpty {
+            let toolMsgs = messages.filter { ($0["role"] as? String) == "tool" }
+            if !toolMsgs.isEmpty {
+                fullPrompt += "\n\n" + toolMsgs.map { "[工具结果] \(Self.msgText($0))" }.joined(separator: "\n")
+            }
+            fullPrompt += "\n\n" + YaotaiTools.buildInjection(json, funcs: toolDefs)
+            EngineLog.shared.add("[网关] 工具调用启用：\(toolDefs.count) 个工具（网页版协议降级模式，无需官方 Key）")
         }
 
         // ── 会话链判定 ──
@@ -705,13 +740,26 @@ final class LocalAPIServer: ObservableObject {
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     text = "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"
                 }
+                // 工具调用解析：模型吐了标记就升级成标准 tool_calls 响应
+                var toolCallsJSON: [[String: Any]] = []
+                if !toolDefs.isEmpty, let parsed = YaotaiTools.parse(text) {
+                    toolCallsJSON = parsed.calls.map { tc in
+                        ["id": tc.id, "type": "function",
+                         "function": ["name": tc.name, "arguments": tc.arguments]]
+                    }
+                    text = parsed.remainder
+                    EngineLog.shared.add("[网关] 工具调用（非流式）：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
+                }
+                let finishReason = toolCallsJSON.isEmpty ? "stop" : "tool_calls"
+                var message: [String: Any] = ["role": "assistant", "content": text, "reasoning_content": res.think]
+                if !toolCallsJSON.isEmpty { message["tool_calls"] = toolCallsJSON }
                 let obj: [String: Any] = [
                     "id": cid, "object": "chat.completion",
                     "created": Int(Date().timeIntervalSince1970), "model": model,
                     "choices": [[
                         "index": 0,
-                        "message": ["role": "assistant", "content": text, "reasoning_content": res.think],
-                        "finish_reason": "stop",
+                        "message": message,
+                        "finish_reason": finishReason,
                     ]],
                     "usage": [
                         "prompt_tokens": max(1, fullPrompt.count / 2),
