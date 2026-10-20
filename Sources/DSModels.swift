@@ -114,6 +114,7 @@ enum DSEvent {
     case thinkDelta(String)
     case contentDelta(String)
     case meta(Int64)
+    case usage(Int64)
     case done(finishReason: String?)
 }
 
