@@ -12,7 +12,7 @@ struct PromptEditorView: View {
     var body: some View {
         Form {
             Section {
-                VStack(align: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
                     TextEditor(text: $agent)
                         .font(.system(size: 12, design: .monospaced))
                         .frame(height: 180)
