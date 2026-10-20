@@ -568,6 +568,9 @@ final class LocalAPIServer: ObservableObject {
         let chained = reuse != nil
 
         EngineLog.shared.add("[网关] 请求 model=\(model) stream=\(stream) msgs=\(messages.count) chain=\(chained ? "复用" : "新建") fullLen=\(fullPrompt.count)")
+        if chained, let c = reuse {
+            EngineLog.shared.add("[网关] 复用会话 sid=…\(c.sessionID.suffix(8)) 上轮msgID=\(c.lastMsgID) 上轮msgCount=\(c.msgCount)")
+        }
         EngineLog.shared.add("[网关] promptHead=\(String((chained ? lastUser : fullPrompt).prefix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
 
         do {
@@ -586,7 +589,11 @@ final class LocalAPIServer: ObservableObject {
                 // 链式轮只发新消息（历史在上游会话里）；首轮发完整 prompt
                 prompt: chained ? (lastUser.isEmpty ? fullPrompt : lastUser) : fullPrompt,
                 thinking: thinking, search: search,
-                onMeta: { box.msgID = $0 })
+                onMeta: { mid in
+                    box.msgID = mid
+                    EngineLog.shared.add("[网关] 上游响应 message id=\(mid)")
+                })
+            EngineLog.shared.add("[网关] 发送 sid=…\(sessionID.suffix(8)) parent=\(parent.map { "\($0)" } ?? "nil")")
 
             func saveChain(_ sid: String) {
                 chainLock.lock()
