@@ -23,7 +23,7 @@ final class ShellEngine {
         if t.isEmpty { return Result(output: "", exitCode: 0, newCwd: nil) }
         // 支持 | 简易管道（只支持 cat x | grep y 这类单级）
         if t.contains("|") {
-            let segs = t.split(separator: "|", map: { $0.trimmingCharacters(in: .whitespaces) })
+            let segs = t.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
             var pipeIn = ""
             var last = Result(output: "", exitCode: 0, newCwd: nil)
             for (i, s) in segs.enumerated() {
@@ -323,7 +323,7 @@ final class ShellEngine {
             return buf + "JS Error: " + e.toString()
         }
         if let r = result, !r.isUndefined, !r.isNull {
-            let s = r.toString()
+            let s = r.toString() ?? ""
             if !s.isEmpty { buf += "⇒ " + s + "\n" }
         }
         return buf.trimmingCharacters(in: .whitespacesAndNewlines)
