@@ -161,7 +161,7 @@ struct FileBrowserView: View {
         }
         .sheet(item: $vm.editing) { f in
             NavigationStack {
-                TextEditor(text: f.binding)
+                TextEditor(text: f.$text)
                     .font(.system(size: 13, design: .monospaced))
                     .padding(8)
                     .navigationTitle(f.name)
@@ -186,13 +186,13 @@ final class FileVM: ObservableObject {
         let isDir: Bool
         let size: Int64
     }
-    struct EditingFile: Identifiable {
+    final class EditingFile: Identifiable {
         let id = UUID().uuidString
         var name: String
-        var url: URL
-        var text: String
-        var binding: Binding<String> {
-            Binding(get: { self.text }, set: { self.text = $0 })
+        let url: URL
+        @Published var text: String
+        init(name: String, url: URL, text: String) {
+            self.name = name; self.url = url; self.text = text
         }
     }
 
@@ -319,7 +319,7 @@ final class WebPreviewVM: ObservableObject {
     func reload() {
         let cur = url
         url = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { url = cur }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.url = cur }
     }
 }
 
