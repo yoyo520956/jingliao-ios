@@ -85,12 +85,14 @@ extension Dictionary where Key == String, Value == Any {
     }
 }
 
-/// 通用信封 {code, msg, data:{biz_data:...}}
+/// 通用信封 {code, msg, data:{biz_code, biz_msg, biz_data:...}}
 struct DSEnvelope {
     var code: Int
     var msg: String
     var data: [String: Any]?
     var bizData: [String: Any]?
+    var bizCode: Int
+    var bizMsg: String
 
     static func parse(_ data: Data) -> DSEnvelope? {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
@@ -100,7 +102,9 @@ struct DSEnvelope {
             code: (root["code"] as? NSNumber)?.intValue ?? -1,
             msg: root["msg"] as? String ?? "",
             data: inner,
-            bizData: biz)
+            bizData: biz,
+            bizCode: (inner?["biz_code"] as? NSNumber)?.intValue ?? 0,
+            bizMsg: inner?["biz_msg"] as? String ?? "")
     }
 }
 
