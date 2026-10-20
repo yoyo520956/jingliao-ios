@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 
+/// 聊天页——微信 8.0.79 风格：灰底白/我的绿气泡、底部语音/表情/加号输入栏
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var chats: ChatStore
@@ -13,7 +14,7 @@ struct ChatView: View {
                 messageList(conv)
                 inputBar
             }
-            .background(Color(.systemBackground))
+            .background(WX.listBG)
             .navigationTitle(conv.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -21,7 +22,9 @@ struct ChatView: View {
                     Button {
                         vm.newChat()
                     } label: {
-                        Image(systemName: "plus.message")
+                        Image(systemName: "plus")
+                            .font(.system(size: 18))
+                            .foregroundColor(WX.titleBlack)
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -29,6 +32,7 @@ struct ChatView: View {
                         PiPManager.shared.toggle()
                     } label: {
                         Image(systemName: PiPManager.shared.isActive ? "pip.exit" : "pip.enter")
+                            .foregroundColor(WX.titleBlack)
                     }
                 }
             }
@@ -50,17 +54,18 @@ struct ChatView: View {
     private func messageList(_ conv: Conversation) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if conv.messages.isEmpty {
                         VStack(spacing: 10) {
                             Image(systemName: "fish.fill")
                                 .font(.system(size: 44))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(WX.secondary)
                             Text("鲸聊 · DeepSeek 免费直连")
                                 .font(.headline)
+                                .foregroundColor(WX.titleBlack)
                             Text("到「账号」页登录网页版账号即可开聊；开「设置→本地网关」还能给其他 App 当 API 用。")
                                 .font(.footnote)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(WX.secondary)
                                 .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity)
@@ -72,15 +77,9 @@ struct ChatView: View {
                 }
                 .padding(12)
             }
-            .onChange(of: conv.messages.count) { _ in
-                scrollToEnd(proxy, conv)
-            }
-            .onChange(of: conv.messages.last?.content ?? "") { _ in
-                scrollToEnd(proxy, conv)
-            }
-            .onChange(of: conv.messages.last?.thinking ?? "") { _ in
-                scrollToEnd(proxy, conv)
-            }
+            .onChange(of: conv.messages.count) { _ in scrollToEnd(proxy, conv) }
+            .onChange(of: conv.messages.last?.content ?? "") { _ in scrollToEnd(proxy, conv) }
+            .onChange(of: conv.messages.last?.thinking ?? "") { _ in scrollToEnd(proxy, conv) }
         }
     }
 
@@ -90,20 +89,20 @@ struct ChatView: View {
         }
     }
 
+    /// 微信输入栏：工具列（深思/联网）+ 输入框 + 语音键 + 发送键
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 8) {
             VStack(spacing: 6) {
-                toggleChip(icon: "brain", title: "深思", on: vm.thinkingOn) {
-                    vm.thinkingOn.toggle()
-                }
-                toggleChip(icon: "globe", title: "联网", on: vm.searchOn) {
-                    vm.searchOn.toggle()
-                }
+                toggleChip(title: "深思", on: vm.thinkingOn) { vm.thinkingOn.toggle() }
+                toggleChip(title: "联网", on: vm.searchOn) { vm.searchOn.toggle() }
             }
-            TextField("输入消息…", text: $vm.draft, axis: .vertical)
+            TextField("", text: $vm.draft, axis: .vertical)
                 .lineLimit(1...5)
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 18).fill(Color(.secondarySystemBackground)))
+                .font(.system(size: 17))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
                 .submitLabel(.send)
                 .onSubmit { vm.send() }
             VStack(spacing: 6) {
@@ -112,43 +111,42 @@ struct ChatView: View {
                 } label: {
                     Image(systemName: "keyboard.chevron.chevron.down")
                         .font(.system(size: 15))
-                        .foregroundColor(.secondary)
-                        .frame(width: 42, height: 40)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+                        .foregroundColor(WX.titleBlack)
+                        .frame(width: 34, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
                 }
                 .buttonStyle(.borderless)
                 Button {
                     if vm.busy { vm.stop() } else { vm.send() }
                 } label: {
                     Image(systemName: vm.busy ? "stop.circle.fill" : "arrow.up.circle.fill")
-                        .font(.system(size: 26))
-                        .foregroundColor(vm.busy ? Color.red : (vm.draft.isEmpty ? Color.gray : Color.blue))
+                        .font(.system(size: 28))
+                        .foregroundColor(vm.busy ? WX.badgeRed : (vm.draft.isEmpty ? WX.secondary : WX.green))
                 }
                 .buttonStyle(.borderless)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(.systemBackground))
-        .overlay(alignment: .top) {
-            Divider()
-        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(WX.inputBar)
+        .overlay(alignment: .top) { Rectangle().fill(WX.separator).frame(height: 0.5) }
     }
 
-    private func toggleChip(icon: String, title: String, on: Bool, action: @escaping () -> Void) -> some View {
+    private func toggleChip(title: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 2) {
-                Image(systemName: icon).font(.system(size: 13))
-                Text(title).font(.system(size: 10))
-            }
-            .foregroundColor(on ? Color.white : Color.secondary)
-            .frame(width: 42, height: 40)
-            .background(RoundedRectangle(cornerRadius: 10).fill(on ? Color.blue : Color(.secondarySystemBackground)))
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundColor(on ? .white : WX.titleBlack)
+                .frame(width: 42, height: 32)
+                .background(RoundedRectangle(cornerRadius: 8).fill(on ? WX.green : WX.inputField))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
         }
         .buttonStyle(.borderless)
     }
 }
 
+/// 微信气泡：我的 #95EC69 右对齐带尾巴，对方白色左对齐
 struct Bubble: View {
     let m: ChatMessage
     @State private var showThink = false
@@ -161,26 +159,47 @@ struct Bubble: View {
                     DisclosureGroup(isExpanded: $showThink) {
                         Text(m.thinking)
                             .font(.footnote)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(WX.secondary)
                             .textSelection(.enabled)
                     } label: {
                         Label("深度思考", systemImage: "brain.head.profile")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(WX.secondary)
                     }
                 }
                 if m.role == "user" {
-                    Text(m.content)
-                        .foregroundColor(Color.white)
-                        .padding(12)
-                        .background(RoundedRectangle(cornerRadius: 16).fill(Color.blue))
-                        .textSelection(.enabled)
+                    HStack(alignment: .bottom, spacing: 6) {
+                        Text(m.content)
+                            .font(.system(size: 17))
+                            .foregroundColor(WX.titleBlack)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                        Text("")
+                            .frame(width: 6, height: 6)
+                            .background(Color.white.opacity(0.0001))
+                    }
+                    .background(WX.bubbleMine)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(alignment: .bottomTrailing) {
+                        // 气泡小尾巴
+                        Path { p in
+                            p.move(to: CGPoint(x: 40, y: 0))
+                            p.addLine(to: CGPoint(x: 48, y: 0))
+                            p.addLine(to: CGPoint(x: 40, y: 6))
+                            p.closeSubpath()
+                        }
+                        .fill(WX.bubbleMine)
+                        .rotationEffect(.degrees(180))
+                        .offset(x: -4, y: -3)
+                        .frame(width: 48, height: 6)
+                    }
                 } else if m.failed {
                     Text(m.content)
                         .font(.callout)
-                        .foregroundColor(Color.red)
+                        .foregroundColor(WX.badgeRed)
                         .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.tertiarySystemFill)))
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemFill)))
                 } else {
                     MarkdownText(text: m.content.isEmpty ? "…" : m.content)
                         .padding(4)
