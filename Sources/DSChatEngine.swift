@@ -145,13 +145,13 @@ final class DSChatEngine {
             EngineLog.shared.add("PoW 挑战原始响应: \(raw)")
             throw DSError(message: "PoW 挑战解析失败 原始data=\(raw)")
         }
-        if ch.targetPath.isEmpty { ch.targetPath = targetPath }
+        if ch.targetPath.isEmpty { ch.targetPath = "/api/v0/chat/completion" }
         return ch
     }
 
     private func runCompletion(_ r: CompleteRequest, emit: @escaping (DSEvent) -> Void) async throws {
         EngineLog.shared.add("取 PoW 挑战（\("thinking=\(r.thinking) search=\(r.search)")）")
-        let challenge = try await fetchChallenge(account: r.account, targetPath: "/chat/completion")
+        let challenge = try await fetchChallenge(account: r.account, targetPath: "/api/v0/chat/completion")
         EngineLog.shared.add("PoW 求解 difficulty=\(Int(challenge.difficulty))")
         let answer = try await DSPowSolver.shared.solve(challenge)
         EngineLog.shared.add("PoW 完成 answer=\(answer)")
