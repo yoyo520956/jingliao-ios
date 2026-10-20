@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// 瑶台 AI 助手：官方 DeepSeek API + 工具调用闭环
 /// 工具：run_command / read_file / write_file / list_files / git_clone
@@ -66,6 +67,38 @@ final class AgentRunner: ObservableObject {
             ]],
         ]],
         ["type": "function", "function": [
+            "name": "file_edit",
+            "description": "精确替换文件中的字符串（old_string 必须在文件中唯一）。大文件局部改动用它，别整文件重写",
+            "parameters": ["type": "object", "properties": [
+                "path": ["type": "string", "description": "文件路径"],
+                "old_string": ["type": "string", "description": "被替换的原文（必须唯一匹配）"],
+                "new_string": ["type": "string", "description": "替换后的内容"],
+            ], "required": ["path", "old_string", "new_string"]],
+        ]],
+        ["type": "function", "function": [
+            "name": "search_files",
+            "description": "在沙盒范围内递归搜索文件内容（类似 grep -r），返回匹配的文件:行号",
+            "parameters": ["type": "object", "properties": [
+                "pattern": ["type": "string", "description": "搜索关键词或正则"],
+                "path": ["type": "string", "description": "起始目录，空 = ~/"],
+            ], "required": ["pattern"]],
+        ]],
+        ["type": "function", "function": [
+            "name": "append_file",
+            "description": "向文件末尾追加内容（不覆盖原内容），适合分段写大文件",
+            "parameters": ["type": "object", "properties": [
+                "path": ["type": "string", "description": "文件路径"],
+                "content": ["type": "string", "description": "要追加的内容"],
+            ], "required": ["path", "content"]],
+        ]],
+        ["type": "function", "function": [
+            "name": "http_fetch",
+            "description": "抓取网页/API 内容（GET，返回正文文本前 2 万字符），可用来查资料、读文档、调 REST API",
+            "parameters": ["type": "object", "properties": [
+                "url": ["type": "string", "description": "完整 http(s) 地址"],
+            ], "required": ["url"]],
+        ]],
+        ["type": "function", "function": [
             "name": "git_clone",
             "description": "把 GitHub 仓库克隆到沙盒（公开仓库无需登录；私有仓库需设置页填 PAT）",
             "parameters": ["type": "object", "properties": [
@@ -104,33 +137,95 @@ final class AgentRunner: ObservableObject {
         await webRound(wire)
     }
 
+    /// 请求本地网关。直接用 Network.framework 裸 TCP：URLSession.shared 会走 iOS 系统代理，
+    /// 公共 Wi-Fi/热点下环回地址被代理劫持 → -1005 connection lost（AgentRunner 专属故障，
+    /// 外部 App 用自己的网络栈反而没事）。裸 TCP 完全没有代理环节。
     private func gatewayPost(_ body: [String: Any], port: UInt16? = nil) async throws -> Data {
         let p = port ?? LocalAPIServer.shared.port
-        guard let url = URL(string: "http://127.0.0.1:\(p)/v1/chat/completions"),
-              let payload = try? JSONSerialization.data(withJSONObject: body) else {
-            throw NSError(domain: "Yaotai", code: -1, userInfo: [NSLocalizedDescriptionKey: "网关地址无效（port=\(p)）"])
+        guard p != 0 else {
+            throw NSError(domain: "Yaotai", code: -1, userInfo: [NSLocalizedDescriptionKey: "网关未运行（port=0）"])
         }
+        guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
+            throw NSError(domain: "Yaotai", code: -2, userInfo: [NSLocalizedDescriptionKey: "请求体序列化失败"])
+        }
+        var reqData = Data("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:\(p)\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n".utf8)
+        reqData.append(payload)
         var lastErr: Error = NSError(domain: "Yaotai", code: -1, userInfo: [NSLocalizedDescriptionKey: "未知错误"])
-        // 网络抖动/连接丢失重试一次（-1005 常见于网关重启瞬间）
         for attempt in 1...2 {
             do {
-                var req = URLRequest(url: url)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = payload
-                req.timeoutInterval = 180
-                let (d, resp) = try await URLSession.shared.data(for: req)
-                if let h = resp as? HTTPURLResponse, h.statusCode >= 400 {
-                    lastErr = NSError(domain: "Yaotai", code: h.statusCode, userInfo: [NSLocalizedDescriptionKey: "网关返回 HTTP \(h.statusCode)"])
-                    continue
-                }
-                return d
+                return try await rawPost(host: "127.0.0.1", port: p, data: reqData)
             } catch {
                 lastErr = error
                 if attempt == 1 { try? await Task.sleep(nanoseconds: 600_000_000) }
             }
         }
         throw lastErr
+    }
+
+    /// 裸 TCP POST，读服务端响应体（Content-Length 或读到连接关闭为止）
+    private func rawPost(host: String, port: UInt16, data: Data) async throws -> Data {
+        final class Box { var resumed = false }
+        let box = Box()
+        let lock = NSLock()
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+            func finish(_ r: Result<Data, Error>) {
+                lock.lock(); defer { lock.unlock() }
+                guard !box.resumed else { return }
+                box.resumed = true
+                switch r {
+                case .success(let d): cont.resume(returning: d)
+                case .failure(let e): cont.resume(throwing: e)
+                }
+            }
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                finish(.failure(NSError(domain: "Yaotai", code: -2, userInfo: [NSLocalizedDescriptionKey: "端口无效"])))
+                return
+            }
+            let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+            var buf = Data()
+            let q = DispatchQueue(label: "yaotai.rawpost")
+            // 硬超时：180s
+            q.asyncAfter(wallDeadline: .now() + 180) {
+                conn.cancel()
+                finish(.failure(NSError(domain: "Yaotai", code: -1001, userInfo: [NSLocalizedDescriptionKey: "网关响应超时（180s）"])))
+            }
+            conn.stateUpdateHandler = { state in
+                if case .failed(let e) = state {
+                    conn.cancel()
+                    finish(.failure(NSError(domain: "Yaotai", code: (e as NSError).code, userInfo: [NSLocalizedDescriptionKey: "连接网关失败：\(e.localizedDescription)"]))
+                }
+            }
+            conn.start(queue: q)
+            conn.send(content: data, completion: .contentProcessed { e in
+                if let e {
+                    conn.cancel()
+                    finish(.failure(NSError(domain: "Yaotai", code: (e as NSError).code, userInfo: [NSLocalizedDescriptionKey: "发送请求失败：\(e.localizedDescription)"])))
+                    return
+                }
+                func recv() {
+                    conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { d, _, isComplete, e in
+                        if let d { buf.append(d) }
+                        if let e {
+                            conn.cancel()
+                            finish(.failure(NSError(domain: "Yaotai", code: (e as NSError).code, userInfo: [NSLocalizedDescriptionKey: "读取响应失败：\(e.localizedDescription)"])))
+                            return
+                        }
+                        if isComplete {
+                            conn.cancel()
+                            // 剥 HTTP 头
+                            if let r = buf.range(of: Data("\r\n\r\n".utf8)) {
+                                finish(.success(Data(buf[(r.upperBound)...])))
+                            } else {
+                                finish(.success(buf))
+                            }
+                            return
+                        }
+                        recv()
+                    }
+                }
+                recv()
+            })
+        }
     }
 
     private func webRound(_ wire: [[String: Any]]) async {
@@ -270,6 +365,68 @@ final class AgentRunner: ObservableObject {
             guard let u = fs.resolve(p, cwd: fs.home) else { return "路径无效" }
             if !fs.isDir(u) { return fs.display(u) + "（文件）" }
             return fs.list(u).map { $0.name + ($0.isDir ? "/" : "") }.joined(separator: "  ")
+        case "file_edit":
+            let p = args["path"] as? String ?? ""
+            let old = args["old_string"] as? String ?? ""
+            let new = args["new_string"] as? String ?? ""
+            guard !old.isEmpty else { return "old_string 不能为空" }
+            guard let u = fs.resolve(p, cwd: fs.home) else { return "路径无效或越界" }
+            guard let s = fs.read(u) else { return "读取失败：文件不存在" }
+            let count = s.components(separatedBy: old).count - 1
+            if count == 0 { return "没找到 old_string 的内容，替换失败" }
+            if count > 1 { return "old_string 匹配到 \(count) 处，不唯一，改不了（请带上下文缩小范围）" }
+            do { try fs.write(u, s.replacingOccurrences(of: old, with: new)); return "已替换并写入 \(fs.display(u))" }
+            catch { return "写入失败：\(error.localizedDescription)" }
+        case "search_files":
+            let pattern = args["pattern"] as? String ?? ""
+            guard !pattern.isEmpty else { return "pattern 不能为空" }
+            let start = (args["path"] as? String ?? "").isEmpty ? fs.home : (fs.resolve(args["path"] as? String ?? "~", cwd: fs.home) ?? fs.home)
+            var out: [String] = []
+            let rx = try? NSRegularExpression(pattern: pattern)
+            func walk(_ u: URL, depth: Int) {
+                guard depth < 8, out.count < 200 else { return }
+                for it in fs.list(u) {
+                    let c = u.appendingPathComponent(it.name)
+                    if it.isDir { walk(c, depth: depth + 1); continue }
+                    guard let s = fs.read(c) else { continue }
+                    let lines = s.components(separatedBy: "\n")
+                    for (i, line) in lines.enumerated() {
+                        let hit = rx.map { $0.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil } ?? line.contains(pattern)
+                        if hit {
+                            out.append("\(fs.display(c)):\(i + 1): \(line.prefix(200))")
+                            if out.count >= 200 { return }
+                        }
+                    }
+                }
+            }
+            walk(start, depth: 0)
+            return out.isEmpty ? "（没有匹配）" : out.joined(separator: "\n")
+        case "append_file":
+            let p = args["path"] as? String ?? ""
+            let c = args["content"] as? String ?? ""
+            guard let u = fs.resolve(p, cwd: fs.home) else { return "路径无效或越界" }
+            if !FileManager.default.fileExists(atPath: u.path) {
+                do { try fs.write(u, c); return "新文件已创建并写入 \(fs.display(u))" }
+                catch { return "写入失败：\(error.localizedDescription)" }
+            }
+            guard let h = try? FileHandle(forWritingTo: u) else { return "打开文件失败" }
+            defer { try? h.close() }
+            h.seekToEnd()
+            h.write(Data(c.utf8))
+            return "已追加 \(c.utf8.count) 字节到 \(fs.display(u))"
+        case "http_fetch":
+            let urlStr = args["url"] as? String ?? ""
+            guard let u = URL(string: urlStr), ["http", "https"].contains(u.scheme) else { return "URL 无效" }
+            var body = Data()
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: u) { d, r, _ in
+                body = d ?? Data()
+                if let h = r as? HTTPURLResponse, h.statusCode >= 400 { body = Data("HTTP \(h.statusCode)".utf8) }
+                sem.signal()
+            }.resume()
+            _ = sem.wait(timeout: .now() + 30)
+            guard !body.isEmpty else { return "抓取失败（超时或无内容）" }
+            return String(data: body.prefix(20000), encoding: .utf8) ?? "（二进制内容，无法显示）"
         case "git_clone":
             let url = args["url"] as? String ?? ""
             let injected = GitHubClient.injectToken(url, token: GitHubClient.pat)
