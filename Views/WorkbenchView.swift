@@ -160,8 +160,9 @@ struct FileBrowserView: View {
             }
         }
         .sheet(item: $vm.editing) { f in
+            let bind = Binding(get: { f.text }, set: { f.text = $0 })
             NavigationStack {
-                TextEditor(text: f.$text)
+                TextEditor(text: bind)
                     .font(.system(size: 13, design: .monospaced))
                     .padding(8)
                     .navigationTitle(f.name)
@@ -190,7 +191,7 @@ final class FileVM: ObservableObject {
         let id = UUID().uuidString
         var name: String
         let url: URL
-        @Published var text: String
+        var text: String
         init(name: String, url: URL, text: String) {
             self.name = name; self.url = url; self.text = text
         }
