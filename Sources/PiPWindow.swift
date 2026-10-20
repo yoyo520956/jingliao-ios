@@ -261,7 +261,7 @@ extension PiPManager: AVPictureInPictureSampleBufferPlaybackDelegate, AVPictureI
         // 面板是实况流，无需暂停语义
     }
 
-    func pictureInPictureControllerTimeRange(_ pc: AVPictureInPictureController) -> CMTimeRange {
+    func pictureInPictureControllerTimeRangeForPlayback(_ pc: AVPictureInPictureController) -> CMTimeRange {
         CMTimeRange(start: .zero, duration: CMTime(value: 3600, timescale: 1))
     }
 
@@ -269,7 +269,11 @@ extension PiPManager: AVPictureInPictureSampleBufferPlaybackDelegate, AVPictureI
 
     func pictureInPictureController(_ pc: AVPictureInPictureController, didTransitionToRenderSize newSize: CMVideoDimensions) {}
 
-    func pictureInPictureControllerTimeRangeDidEnd(_ pc: AVPictureInPictureController) {}
+    func pictureInPictureController(_ pc: AVPictureInPictureController,
+                                    skipByInterval skipInterval: CMTime,
+                                    completion completionHandler: @escaping @Sendable () -> Void) {
+        completionHandler()
+    }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pc: AVPictureInPictureController) {
         pipRunning = true
