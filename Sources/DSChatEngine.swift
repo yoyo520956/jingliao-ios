@@ -140,7 +140,10 @@ final class DSChatEngine {
         let cj = (env.bizData?["challenge"] as? [String: Any])
             ?? (env.data?["challenge"] as? [String: Any])
         guard let cj, var ch = DSChallenge.parse(cj) else {
-            throw DSError(message: "PoW 挑战解析失败")
+            let raw = env.data.flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+                .flatMap { String(data: $0.prefix(300), encoding: .utf8) } ?? "nil"
+            EngineLog.shared.add("PoW 挑战原始响应: \(raw)")
+            throw DSError(message: "PoW 挑战解析失败 原始data=\(raw)")
         }
         if ch.targetPath.isEmpty { ch.targetPath = targetPath }
         return ch
