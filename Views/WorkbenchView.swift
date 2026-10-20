@@ -393,7 +393,7 @@ struct AgentEmptyState: View {
 
 /// 单条消息（气泡 + 工具结果卡 + 运行中指示）
 struct AgentRow: View {
-    let m: Msg
+    let m: AgentRunner.Msg
     let showProgress: Bool
     let status: String
     var body: some View {
