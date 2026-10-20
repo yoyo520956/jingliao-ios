@@ -41,6 +41,60 @@ final class LocalAPIServer: ObservableObject {
     private let queue = DispatchQueue(label: "jl.localserver")
     private let engine = DSChatEngine.shared
 
+    // ── 会话链：同一对话复用上游 DeepSeek session，后续轮只发新消息 ──
+    // 根治两件事：①后续轮 prompt 不再滚雪球（不会被上游截断）②历史由上游会话自己保管 = 真记忆
+    private struct ConvChain {
+        var sessionID: String
+        var lastMsgID: Int64
+        var msgCount: Int
+        var lastUser: String
+        var usedAt: Date
+    }
+    private var chains: [String: ConvChain] = [:]
+    private let chainLock = NSLock()
+    private final class MsgBox { var msgID: Int64 = 0 }
+
+    /// 从消息里抽正文（兼容 string / parts / input_text / 无 type / 纯 JSON 兜底）
+    static func msgText(_ m: [String: Any]) -> String {
+        if let c = m["content"] as? String { return c }
+        if let arr = m["content"] as? [[String: Any]] {
+            let t = arr.compactMap { p -> String? in
+                if let ty = p["type"] as? String, ty != "text" && ty != "input_text" { return nil }
+                return p["text"] as? String
+            }.joined(separator: "\n")
+            if !t.isEmpty { return t }
+            return (try? JSONSerialization.data(withJSONObject: arr))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        }
+        return ""
+    }
+
+    /// 对话身份键：系统人设头部 + 第一条用户消息头部（同一对话跨轮稳定；新对话开场不同则分开）
+    static func conversationKey(_ messages: [[String: Any]]) -> String {
+        let sys = messages.first(where: { ($0["role"] as? String) == "system" }).map { msgText($0) } ?? ""
+        let firstUser = messages.first(where: { ($0["role"] as? String) == "user" }).map { msgText($0) } ?? ""
+        return String(sys.prefix(120)) + "\u{1}" + String(firstUser.prefix(300))
+    }
+
+    /// 按 [系统]/[用户]/[助手]/[工具] 标签拼完整 prompt
+    static func assemblePrompt(_ messages: [[String: Any]], keep: Int? = nil) -> String {
+        let list: [[String: Any]]
+        if let keep, messages.count > keep {
+            var k: [[String: Any]] = []
+            if (messages.first?["role"] as? String) == "system" { k.append(messages[0]) }
+            if messages.count > 1 { k.append(messages[1]) }
+            k.append(contentsOf: messages.suffix(4))
+            list = k
+        } else {
+            list = messages
+        }
+        return list.map { m -> String in
+            let role = m["role"] as? String ?? "user"
+            let tag = role == "assistant" ? "助手" : (role == "system" ? "系统" : (role == "tool" ? "工具" : "用户"))
+            return "[\(tag)] \(msgText(m))"
+        }.joined(separator: "\n\n")
+    }
+
     func start() {
         stop()
         let params = NWParameters.tcp
@@ -250,16 +304,8 @@ final class LocalAPIServer: ObservableObject {
     static func lastUserText(_ messages: [[String: Any]]) -> String {
         for m in messages.reversed() {
             if (m["role"] as? String ?? "user") != "user" { continue }
-            if let c = m["content"] as? String, !c.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return c
-            }
-            if let arr = m["content"] as? [[String: Any]] {
-                let t = arr.compactMap { p -> String? in
-                    if let ty = p["type"] as? String, ty != "text" && ty != "input_text" { return nil }
-                    return p["text"] as? String
-                }.joined(separator: "\n")
-                if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return t }
-            }
+            let t = msgText(m)
+            if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return t }
         }
         return ""
     }
@@ -276,6 +322,56 @@ final class LocalAPIServer: ObservableObject {
         ]
         let d2 = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         return String(decoding: d2, as: UTF8.self)
+    }
+
+    /// 流式泵：跑一轮 completion，把事件转成 SSE chunk 吐出；返回 (有正文, 出错)
+    private func pumpStream(
+        _ conn: NWConnection, _ account: DSAccount, _ sid: String,
+        _ req: DSChatEngine.CompleteRequest, _ cid: String, _ model: String
+    ) async -> (content: Bool, err: Bool) {
+        var gotContent = false, gotErr = false
+        do {
+            for try await ev in engine.complete(req) {
+                switch ev {
+                case .contentDelta(let t):
+                    gotContent = true
+                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
+                case .thinkDelta(let t):
+                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
+                case .usage, .meta:
+                    break
+                case .done(let fr):
+                    if let fr, fr.hasPrefix("error:") {
+                        gotErr = true
+                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
+                    }
+                }
+            }
+        } catch {
+            gotErr = true
+            sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
+        }
+        _ = sid
+        return (gotContent, gotErr)
+    }
+
+    /// 非流式泵：跑一轮 completion，累计正文；返回 (正文, 思考, 错误)
+    private func pumpCollect(_ account: DSAccount, _ req: DSChatEngine.CompleteRequest) async -> (content: String, think: String, err: String) {
+        var content = "", think = "", err = ""
+        do {
+            for try await ev in engine.complete(req) {
+                switch ev {
+                case .thinkDelta(let t): think += t
+                case .contentDelta(let t): content += t
+                case .usage, .meta: break
+                case .done(let fr):
+                    if let fr, fr.hasPrefix("error:") { err = String(fr.dropFirst(6)) }
+                }
+            }
+        } catch {
+            err = error.localizedDescription
+        }
+        return (content, think, err)
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?) async {
@@ -298,118 +394,121 @@ final class LocalAPIServer: ObservableObject {
         DSAccountStore.shared.touch(account)
 
         let messages = json["messages"] as? [[String: Any]] ?? []
-        var parts: [String] = []
-        for m in messages {
-            let role = m["role"] as? String ?? "user"
-            var content = ""
-            if let c = m["content"] as? String { content = c }
-            else if let arr = m["content"] as? [[String: Any]] {
-                // 兼容三种 part：{"type":"text"/"input_text","text":...} 与无 type 的 {"text":...}
-                content = arr.compactMap { p -> String? in
-                    if let t = p["type"] as? String, t != "text" && t != "input_text" { return nil }
-                    return p["text"] as? String
-                }.joined(separator: "\n")
-            }
-            if content.isEmpty, let c = m["content"] as? [[String: Any]] {
-                // 兜底：整体当 JSON 序列化用（防新格式整段丢失）
-                content = (try? JSONSerialization.data(withJSONObject: c))
-                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            }
-            let tag = role == "assistant" ? "助手" : (role == "system" ? "系统" : "用户")
-            parts.append("[\(tag)] \(content)")
-        }
-        var prompt = parts.joined(separator: "\n\n")
-        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let last = messages.last {
-            // 兜底：消息全空时用最后一条原文
-            prompt = "\(last)"
-        }
         let stream = (json["stream"] as? Bool) ?? false
         let thinking = (json["thinking_enabled"] as? Bool) ?? false
         let search = (json["search_enabled"] as? Bool) ?? false
+        let model = (json["model"] as? String) ?? "deepseek-chat"
+        let cid = "chatcmpl-" + String(UUID().uuidString.prefix(8))
+        let lastUser = Self.lastUserText(messages)
 
-        let engine = DSChatEngine.shared
-        // ── 请求诊断日志（设置页可见）──
-        let roles = messages.map { $0["role"] as? String ?? "?" }.joined(separator: ",")
-        let modelName = json["model"] as? String ?? "deepseek-chat"
-        EngineLog.shared.add("[网关] 请求 model=\(modelName) stream=\(stream) msgs=\(messages.count) roles=\(roles) promptLen=\(prompt.count)")
-        EngineLog.shared.add("[网关] promptHead=\(String(prompt.prefix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
+        // 完整 prompt：正常全量；超 6 万字符时保留人设+首轮+最近几轮（防上游截断把当前问题也吃掉）
+        var fullPrompt = Self.assemblePrompt(messages)
+        let trimmed = fullPrompt.count > 60_000
+        if trimmed {
+            fullPrompt = Self.assemblePrompt(messages, keep: 8)
+            EngineLog.shared.add("[网关] prompt 超 6 万字符 → 保留人设+首轮+最近 4 条")
+        }
+
+        // ── 会话链判定 ──
+        let key = Self.conversationKey(messages)
+        chainLock.lock()
+        if chains.count > 200 {
+            chains = Dictionary(uniqueKeysWithValues: chains.suffix(200).map { ($0.key, $0.value) })
+        }
+        chains = chains.filter { $0.value.usedAt > Date().addingTimeInterval(-12 * 3600) }
+        var reuse = chains[key]
+        if let e = reuse {
+            let grow = messages.count > e.msgCount
+            let sameTurn = messages.count == e.msgCount && e.lastUser == lastUser
+            if !(grow || sameTurn) || e.lastMsgID == 0 || lastUser.isEmpty {
+                reuse = nil
+                chains.removeValue(forKey: key)
+                EngineLog.shared.add("[网关] 消息数回退/无链 id → 按新对话处理")
+            }
+        }
+        chainLock.unlock()
+        let chained = reuse != nil
+
+        EngineLog.shared.add("[网关] 请求 model=\(model) stream=\(stream) msgs=\(messages.count) chain=\(chained ? "复用" : "新建") fullLen=\(fullPrompt.count)")
+        EngineLog.shared.add("[网关] promptHead=\(String((chained ? lastUser : fullPrompt).prefix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
 
         do {
-            let sessionID = try await engine.createSession(account: account)
+            let sessionID: String
+            let parent: Int64?
+            if let c = reuse {
+                sessionID = c.sessionID
+                parent = c.lastMsgID
+            } else {
+                sessionID = try await engine.createSession(account: account)
+                parent = nil
+            }
+            let box = MsgBox()
             let req = DSChatEngine.CompleteRequest(
-                account: account, sessionID: sessionID, parentMessageID: nil,
-                prompt: prompt, thinking: thinking, search: search, onMeta: nil)
-            let model = (json["model"] as? String) ?? "deepseek-chat"
-            let cid = "chatcmpl-" + String(UUID().uuidString.prefix(8))
+                account: account, sessionID: sessionID, parentMessageID: parent,
+                // 链式轮只发新消息（历史在上游会话里）；首轮发完整 prompt
+                prompt: chained ? (lastUser.isEmpty ? fullPrompt : lastUser) : fullPrompt,
+                thinking: thinking, search: search,
+                onMeta: { box.msgID = $0 })
+
+            func saveChain(_ sid: String) {
+                chainLock.lock()
+                var mid = box.msgID
+                if mid == 0, let c = reuse { mid = c.lastMsgID }
+                if mid != 0 {
+                    chains[key] = ConvChain(sessionID: sid, lastMsgID: mid,
+                                            msgCount: messages.count, lastUser: lastUser, usedAt: Date())
+                } else {
+                    chains.removeValue(forKey: key)
+                }
+                chainLock.unlock()
+            }
+
             if stream {
                 sendHead(conn, contentType: "text/event-stream")
                 // 首字节立刻发 role 增量，避免客户端的首包超时判定为空
                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["role": "assistant"], nil) + "\n\n")
-                var gotContent = false
-                var gotAny = false
-                var gotErr = false
-                do {
-                    for try await ev in engine.complete(req) {
-                        gotAny = true
-                        switch ev {
-                        case .thinkDelta(let t):
-                            sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
-                        case .contentDelta(let t):
-                            gotContent = true
-                            sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
-                        case .usage:
-                            break
-                        case .meta:
-                            break
-                        case .done(let fr):
-                            if let fr, fr.hasPrefix("error:") {
-                                gotErr = true
-                                sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
-                            }
-                        }
+                var r = await pumpStream(conn, account, sessionID, req, cid, model)
+                var activeSid = sessionID
+
+                // 兜底 1：链式轮失败/零正文 → 新会话 + 完整 prompt（上游会话过期就靠这层救）
+                if chained && (!r.content || r.err) {
+                    EngineLog.shared.add("[网关] 链式轮失败/空 → 新会话完整 prompt 重试")
+                    if let sid2 = try? await engine.createSession(account: account) {
+                        if sessionID != sid2 { await engine.deleteSession(account: account, sessionID: sessionID) }
+                        activeSid = sid2
+                        let req2 = DSChatEngine.CompleteRequest(
+                            account: account, sessionID: sid2, parentMessageID: nil,
+                            prompt: fullPrompt, thinking: thinking, search: search,
+                            onMeta: { box.msgID = $0 })
+                        r = await pumpStream(conn, account, sid2, req2, cid, model)
                     }
-                } catch {
-                    gotErr = true
-                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] " + error.localizedDescription], nil) + "\n\n")
                 }
-                if !gotContent && !gotErr {
-                    // 上游零正文：先试裸用户消息重试（疑似人设 prompt 触发内容过滤），再显式报错
-                    let plain = Self.lastUserText(messages)
-                    if !plain.isEmpty && plain != prompt {
+
+                // 兜底 2：仍零正文且无错 → 新会话 + 裸用户消息（防人设 prompt 触发上游过滤）
+                if !r.content && !r.err {
+                    if !lastUser.isEmpty && lastUser != fullPrompt {
                         EngineLog.shared.add("[网关] 零正文 → 裸用户消息重试（规避人设触发过滤）")
-                        if let sid2 = try? await engine.createSession(account: account) {
-                            let req2 = DSChatEngine.CompleteRequest(
-                                account: account, sessionID: sid2, parentMessageID: nil,
-                                prompt: plain, thinking: thinking, search: search, onMeta: nil)
-                            do {
-                                for try await ev in engine.complete(req2) {
-                                    switch ev {
-                                    case .contentDelta(let t):
-                                        gotContent = true
-                                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
-                                    case .thinkDelta(let t):
-                                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
-                                    case .usage, .meta: break
-                                    case .done(let fr):
-                                        if let fr, fr.hasPrefix("error:") {
-                                            gotErr = true
-                                            sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[上游错误] " + String(fr.dropFirst(6))], nil) + "\n\n")
-                                        }
-                                    }
-                                }
-                            } catch {
-                                gotErr = true
-                                sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误-重试] " + error.localizedDescription], nil) + "\n\n")
+                        if let sid3 = try? await engine.createSession(account: account) {
+                            let req3 = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sid3, parentMessageID: nil,
+                                prompt: lastUser, thinking: thinking, search: search, onMeta: nil)
+                            let r3 = await pumpStream(conn, account, sid3, req3, cid, model)
+                            if r3.content {
+                                r = (true, false)
+                                await engine.deleteSession(account: account, sessionID: sid3)
+                            } else {
+                                await engine.deleteSession(account: account, sessionID: sid3)
                             }
-                            await engine.deleteSession(account: account, sessionID: sid2)
                         }
                     }
-                    if !gotContent && !gotErr {
-                        // 给客户端一段可见文本，而不是裸空（否则 Minis 判 empty response）
-                        sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
-                    }
                 }
-                EngineLog.shared.add("[网关] 完成 stream=1 content=\(gotContent ? "有" : "无") events=\(gotAny ? "有" : "无")")
+
+                // 兜底 3：还是空的 → 给客户端一段可见错误文本（否则 Minis 判 empty response）
+                if !r.content && !r.err {
+                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
+                }
+                EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无")")
+                if r.content { saveChain(activeSid) }
                 // 统一收尾：先冲刷 stop + [DONE]，再真正关闭（防 cancel 丢数据）
                 let tail: [Data] = [
                     Data(("data: " + chunkJSON(cid, model, [:], "stop") + "\n\n").utf8),
@@ -417,69 +516,55 @@ final class LocalAPIServer: ObservableObject {
                 ]
                 sendAllThenClose(conn, tail)
             } else {
-                var content = ""
-                var think = ""
-                var errMsg = ""
-                do {
-                    for try await ev in engine.complete(req) {
-                        switch ev {
-                        case .thinkDelta(let t): think += t
-                        case .contentDelta(let t): content += t
-                        case .usage: break
-                        case .meta: break
-                        case .done(let fr):
-                            if let fr, fr.hasPrefix("error:") { errMsg = String(fr.dropFirst(6)) }
-                        }
+                var res = await pumpCollect(account, req)
+                var activeSid = sessionID
+                // 兜底 1：链式失败/空 → 新会话完整 prompt
+                if chained && (res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !res.err.isEmpty) {
+                    EngineLog.shared.add("[网关] 链式轮失败/空（非流式）→ 新会话完整 prompt 重试")
+                    if let sid2 = try? await engine.createSession(account: account) {
+                        if sessionID != sid2 { await engine.deleteSession(account: account, sessionID: sessionID) }
+                        activeSid = sid2
+                        let req2 = DSChatEngine.CompleteRequest(
+                            account: account, sessionID: sid2, parentMessageID: nil,
+                            prompt: fullPrompt, thinking: thinking, search: search,
+                            onMeta: { box.msgID = $0 })
+                        res = await pumpCollect(account, req2)
                     }
-                } catch {
-                    sendErr(conn, status: "502 Bad Gateway", msg: error.localizedDescription)
-                    await engine.deleteSession(account: account, sessionID: sessionID)
-                    conn.cancel()
-                    return
                 }
-                let text0 = errMsg.isEmpty ? content : content + "\n[上游错误] " + errMsg
-                var text = text0
-                var think2 = think
-                // 非流式零正文兜底：用裸用户消息重试一次（疑似人设 prompt 触发过滤）
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let plain = Self.lastUserText(messages)
-                    if !plain.isEmpty && plain != prompt {
+                // 兜底 2：仍空且无错 → 裸用户消息
+                if res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, res.err.isEmpty {
+                    if !lastUser.isEmpty && lastUser != fullPrompt {
                         EngineLog.shared.add("[网关] 零正文（非流式）→ 裸用户消息重试")
-                        if let sid2 = try? await engine.createSession(account: account) {
-                            let req2 = DSChatEngine.CompleteRequest(
-                                account: account, sessionID: sid2, parentMessageID: nil,
-                                prompt: plain, thinking: thinking, search: search, onMeta: nil)
-                            do {
-                                for try await ev in engine.complete(req2) {
-                                    switch ev {
-                                    case .thinkDelta(let t): think2 += t
-                                    case .contentDelta(let t): text += t
-                                    case .usage, .meta: break
-                                    case .done(let fr):
-                                        if let fr, fr.hasPrefix("error:") { text += "\n[上游错误] " + String(fr.dropFirst(6)) }
-                                    }
-                                }
-                            } catch {
-                                text += "\n[网关错误-重试] " + error.localizedDescription
-                            }
-                            await engine.deleteSession(account: account, sessionID: sid2)
+                        if let sid3 = try? await engine.createSession(account: account) {
+                            let req3 = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sid3, parentMessageID: nil,
+                                prompt: lastUser, thinking: thinking, search: search, onMeta: nil)
+                            let r3 = await pumpCollect(account, req3)
+                            if !r3.content.isEmpty { res = r3 }
+                            await engine.deleteSession(account: account, sessionID: sid3)
                         }
                     }
+                }
+                var text = res.content
+                if !res.err.isEmpty { text += "\n[上游错误] " + res.err }
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    text = "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"
                 }
                 let obj: [String: Any] = [
                     "id": cid, "object": "chat.completion",
                     "created": Int(Date().timeIntervalSince1970), "model": model,
                     "choices": [[
                         "index": 0,
-                        "message": ["role": "assistant", "content": text, "reasoning_content": think2],
+                        "message": ["role": "assistant", "content": text, "reasoning_content": res.think],
                         "finish_reason": "stop",
                     ]],
                     "usage": ["prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0],
                 ]
                 sendJSON(conn, obj)
                 EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count)")
-                await engine.deleteSession(account: account, sessionID: sessionID)
-                conn.cancel()
+                if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    saveChain(activeSid)
+                }
             }
         } catch {
             sendErr(conn, status: "502 Bad Gateway", msg: error.localizedDescription)
