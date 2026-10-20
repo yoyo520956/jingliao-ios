@@ -6,12 +6,15 @@ struct PromptEditorView: View {
     @State private var chat = PromptStore.shared.chatPrefix
     @State private var gateway = PromptStore.shared.gatewayDefault
     @State private var toolsNote = PromptStore.shared.toolsNote
+    @State private var builtin = PromptStore.shared.builtin
+    @State private var builtinOn = PromptStore.shared.builtinOn
     @State private var saved = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
+                builtinCard
                 editorCard(
                     title: "AI 助手系统提示词（瑶台）",
                     footer: "决定瑶台 AI 助手的人设与行为方式。",
@@ -50,6 +53,8 @@ struct PromptEditorView: View {
                     PromptStore.shared.toolsNote = toolsNote
                     PromptStore.shared.chatPrefix = chat
                     PromptStore.shared.gatewayDefault = gateway
+                    PromptStore.shared.builtin = builtin
+                    PromptStore.shared.builtinOn = builtinOn
                     saved = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { saved = false }
                 }
@@ -70,6 +75,38 @@ struct PromptEditorView: View {
                     .padding(.bottom, 24)
             }
         }
+    }
+
+    /// 【内置必发提示词】卡片：开关 + 编辑 + 恢复默认
+    private var builtinCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: $builtinOn) {
+                Text("内置必发提示词（每条请求都带）")
+                    .font(.system(size: 13))
+                    .foregroundColor(WX.secondary)
+            }
+            .toggleStyle(SwitchToggleStyle(tint: WX.green))
+            TextEditor(text: $builtin)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(height: 200)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+            Button("恢复默认") { builtin = PromptStore.defaultBuiltin }
+                .font(.system(size: 14))
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(WX.green))
+            Text("官方服务端会删聊天记录，这段提示词不依赖会话：每一条请求（不管用哪个 App 聊什么）都会全量拼在上下文最前面发送。把人设、世界观、必须遵守的规则放这里。")
+                .font(.system(size: 12))
+                .foregroundColor(WX.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 12)
+        .background(WX.cellBG)
+        .cornerRadius(WX.rowCorner)
+        .padding(.horizontal, 15)
+        .padding(.top, 10)
     }
 
     private func editorCard(title: String, footer: String, text: Binding<String>, showDefault: Bool) -> some View {
