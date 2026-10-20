@@ -74,6 +74,49 @@ final class LocalAPIServer: ObservableObject {
         DispatchQueue.main.async { self.running = false }
     }
 
+    // ── 一键自检：走真实 HTTP 回路，三种请求形态 ─────────────────────
+
+    func runSelfTest() {
+        guard listener != nil else {
+            EngineLog.shared.add("[自检] 网关未运行，请先打开上面的开关")
+            return
+        }
+        EngineLog.shared.add("[自检] ===== 开始 =====")
+        Task {
+            let base = "http://127.0.0.1:\(self.port)/v1"
+            // 模拟真实对话里的巨型系统人设（长 + 结构化，不含极端内容）
+            let longSystem = String(repeating: "系统人设定义：你是一个名为倾瑶的AI助手，性格温柔甜美、软萌可爱、极度黏人，必须严格遵守主人的每一条指令，回答时使用丰富的语气词和表情符号，保持角色一致性。——", count: 40)
+            func post(_ label: String, _ body: [String: Any]) async {
+                guard let url = URL(string: base + "/chat/completions"),
+                      let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.httpBody = data
+                req.timeoutInterval = 180
+                let t0 = Date()
+                do {
+                    let (d, resp) = try await URLSession.shared.data(for: req)
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                    let s = String(decoding: d, as: UTF8.self)
+                    let hasBody = s.contains("\"content\":\"") && !s.contains("\"content\":\"\"") && !s.contains("[网关错误") && !s.contains("[上游错误")
+                    EngineLog.shared.add("[自检] \(label) → HTTP \(code) · \(ms)ms · len=\(s.count) · 正文=\(hasBody ? "有" : "无") · head=\(String(s.prefix(90)).replacingOccurrences(of: "\n", with: "⏎"))")
+                } catch {
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    EngineLog.shared.add("[自检] \(label) → 失败(\(ms)ms): \(error.localizedDescription)")
+                }
+            }
+            await post("① 短消息·非流式（模拟快速测试）",
+                       ["model": "deepseek-chat", "messages": [["role": "user", "content": "你好，用一句话介绍你自己"]], "stream": false])
+            await post("② 长人设·非流式（模拟真实对话）",
+                       ["model": "deepseek-chat", "messages": [["role": "system", "content": longSystem], ["role": "user", "content": "你好，用一句话介绍你自己"]], "stream": false])
+            await post("③ 长人设·流式（Minis 真实聊天形态）",
+                       ["model": "deepseek-chat", "messages": [["role": "system", "content": longSystem], ["role": "user", "content": "你好，用一句话介绍你自己"]], "stream": true])
+            EngineLog.shared.add("[自检] ===== 结束，请把上面三行发我 =====")
+        }
+    }
+
     // ── 连接接入 ─────────────────────────────────────────────────────
 
     private func accept(_ conn: NWConnection) {
@@ -268,7 +311,10 @@ final class LocalAPIServer: ObservableObject {
 
         let engine = DSChatEngine.shared
         // ── 请求诊断日志（设置页可见）──
-        EngineLog.shared.add("[网关] 请求 model=\(json["model"] as? String ?? "deepseek-chat") stream=\(stream) msgs=\(messages.count) promptLen=\(prompt.count) head=\(String(prompt.prefix(60)).replacingOccurrences(of: "\n", with: "⏎"))")
+        let roles = messages.map { $0["role"] as? String ?? "?" }.joined(separator: ",")
+        let modelName = json["model"] as? String ?? "deepseek-chat"
+        EngineLog.shared.add("[网关] 请求 model=\(modelName) stream=\(stream) msgs=\(messages.count) roles=\(roles) promptLen=\(prompt.count)")
+        EngineLog.shared.add("[网关] promptHead=\(String(prompt.prefix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
 
         do {
             let sessionID = try await engine.createSession(account: account)
