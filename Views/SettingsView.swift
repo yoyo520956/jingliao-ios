@@ -54,6 +54,30 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("画中画实时监控")
+                                .font(.body)
+                            Text(PiPManager.shared.pipRunning
+                                 ? "悬浮窗运行中 · 每秒刷新"
+                                 : PiPManager.shared.isActive ? "已开启 · 切后台自动进入" : "已关闭")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { PiPManager.shared.isActive },
+                            set: { on in on ? PiPManager.shared.start() : PiPManager.shared.stop() }
+                        ))
+                        .labelsHidden()
+                    }
+                } header: {
+                    Text("画中画监控（其他 App / 主屏幕可看）")
+                } footer: {
+                    Text("开启后显示实时上下文、本轮输出与字/秒、服务端累计 token 消耗，每秒刷新；可最小化到主屏幕或其他 App 上悬浮查看，点悬浮窗左上角「还原」回到本 App。")
+                }
+
+                Section {
                     Toggle("补齐 x-hif-leim 风控令牌（推荐开）", isOn: $hifOn)
                         .onChange(of: hifOn) { v in DSHif.shared.enabled = v }
                     Button("清除 wasm 缓存") {
