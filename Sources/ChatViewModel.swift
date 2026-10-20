@@ -87,6 +87,9 @@ final class ChatViewModel: ObservableObject {
                 account: account, sessionID: conv.sessionID,
                 parentMessageID: parentID == 0 ? nil : parentID,
                 prompt: prompt, thinking: thinking, search: search, onMeta: nil)
+            // 实时统计：上下文基线 = 历史消息正文 + 本条 prompt
+            let baseCtx = conv.messages.reduce(0) { $0 + $1.content.count } + prompt.count
+            LiveStatsCenter.shared.beginRound(baseContextChars: baseCtx)
             var thinkText = ""
             var contentText = ""
             for try await ev in engine.complete(req) {
@@ -97,7 +100,10 @@ final class ChatViewModel: ObservableObject {
                     patch(convID: convID, msgID: placeholderID) { $0.thinking = thinkText }
                 case .contentDelta(let t):
                     contentText += t
+                    LiveStatsCenter.shared.appendStream(t)
                     patch(convID: convID, msgID: placeholderID) { $0.content = contentText }
+                case .usage(let u):
+                    LiveStatsCenter.shared.setUsage(u)
                 case .meta(let mid):
                     if var c = store.conversations.first(where: { $0.id == convID }) {
                         c.parentMessageID = mid
@@ -109,15 +115,18 @@ final class ChatViewModel: ObservableObject {
                     }
                 }
             }
+            LiveStatsCenter.shared.endRound()
             patch(convID: convID, msgID: placeholderID) { m in
                 m.thinking = thinkText
                 m.content = contentText.isEmpty ? "（空回复）" : contentText
             }
         } catch is CancellationError {
+            LiveStatsCenter.shared.abortRound()
             patch(convID: convID, msgID: placeholderID) { m in
                 if m.content.isEmpty { m.content = "（已停止）" }
             }
         } catch {
+            LiveStatsCenter.shared.abortRound()
             let msg = error.localizedDescription
             if msg.contains("SESSION") || msg.lowercased().contains("session") {
                 if var c = store.conversations.first(where: { $0.id == convID }) {
