@@ -540,10 +540,17 @@ final class LocalAPIServer: ObservableObject {
         let lastUser = Self.lastUserText(messages)
 
         // 完整 prompt：正常全量；超 2 万字符走智能裁剪（人设数万字会被上游服务端截断，历史全丢）
-        var fullPrompt = Self.assemblePrompt(messages)
+        // 第三方请求没带 system 且用户配了「网关默认系统提示词」时，用它顶上
+        var effective = messages
+        let gwDefault = PromptStore.shared.gatewayDefault.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !gwDefault.isEmpty, !messages.contains(where: { ($0["role"] as? String) == "system" }) {
+            effective = [["role": "system", "content": gwDefault]] + messages
+        }
+        let fullSource = effective
+        var fullPrompt = Self.assemblePrompt(fullSource)
         if fullPrompt.count > 20_000 {
             EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 2 万 → 智能裁剪（人设头尾+首轮+最近 4 条）")
-            fullPrompt = Self.compactPrompt(messages)
+            fullPrompt = Self.compactPrompt(fullSource)
         }
 
         // ── 会话链判定 ──
