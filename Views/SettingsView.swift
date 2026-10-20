@@ -92,6 +92,22 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Button {
+                        LocalAPIServer.shared.runSelfTest()
+                    } label: {
+                        HStack {
+                            Image(systemName: "stethoscope")
+                            Text("网关自检（跑三种请求形态）")
+                        }
+                    }
+                    .disabled(!server.running)
+                } header: {
+                    Text("诊断（排“快速测试通、真实对话空”）")
+                } footer: {
+                    Text("点一下，鲸聊会通过自己的网关往本机回路发三种请求：① 短消息非流式（=快速测试）② 长人设非流式 ③ 长人设流式（=Minis 真实聊天）。三条结果写进下方日志，直接照见是哪一层断。")
+                }
+
+                Section {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("画中画实时监控")
