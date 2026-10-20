@@ -663,7 +663,9 @@ final class LocalAPIServer: ObservableObject {
         }
         chainLock.unlock()
         persistChains()
-        let chained = reuse != nil
+        // 工具轮绝不走链式：链式只发新用户消息，工具定义/历史工具结果全丢 → 模型反复调同一个工具
+        // 有 tools 的请求永远带完整 prompt（首轮/续轮都是）
+        let chained = (reuse != nil) && toolDefs.isEmpty
 
         EngineLog.shared.add("[网关] 请求 model=\(model) stream=\(stream) msgs=\(messages.count) chain=\(chained ? "复用" : "新建") fullLen=\(fullPrompt.count)")
         if chained, let c = reuse {
