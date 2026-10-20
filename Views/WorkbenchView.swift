@@ -375,6 +375,66 @@ struct WebViewRep: UIViewRepresentable {
 
 // MARK: - AI 助手
 
+/// 未就绪空态（独立子视图：避免巨表达式拖垮编译器类型检查）
+struct AgentEmptyState: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "person.crop.circle.badge.exclam").font(.largeTitle)
+            Text("AI 助手还没就绪").font(.headline)
+            Text("两种通道任一即可：① 设置页登录 DeepSeek 网页版账号（免费，走网页协议工具降级模式）② 填官方 API Key（原生工具调用）。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// 单条消息（气泡 + 工具结果卡 + 运行中指示）
+struct AgentRow: View {
+    let m: Msg
+    let showProgress: Bool
+    let status: String
+    var body: some View {
+        HStack(alignment: .top) {
+            if m.role == "user" { Spacer(minLength: 48) }
+            VStack(alignment: .leading, spacing: 6) {
+                if m.role == "user" {
+                    Text(m.text)
+                        .font(.system(size: 17))
+                        .foregroundColor(WX.titleBlack)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(WX.bubbleMine)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else if m.role == "tool" {
+                    Text("🔧 \(m.text.prefix(600))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(WX.secondary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(WX.inputField))
+                } else {
+                    Text(m.text.isEmpty ? (m.running ? "思考中…" : "") : m.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                }
+                if showProgress, m.running {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.7)
+                        Text(status.isEmpty ? "AI 运行中…" : status)
+                            .font(.system(size: 11))
+                            .foregroundColor(WX.secondary)
+                    }
+                }
+            }
+            if m.role != "user" { Spacer(minLength: 48) }
+        }
+    }
+}
+
 struct AgentChatView: View {
     @StateObject private var agent = AgentRunner.shared
     @State private var input = ""
@@ -383,55 +443,14 @@ struct AgentChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !agent.ready {
-                VStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle.badge.exclam").font(.largeTitle)
-                    Text("AI 助手还没就绪").font(.headline)
-                    Text("两种通道任一即可：① 设置页登录 DeepSeek 网页版账号（免费，走网页协议工具降级模式）② 填官方 API Key（原生工具调用）。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AgentEmptyState()
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(agent.messages) { m in
-                                HStack(alignment: .top) {
-                                    if m.role == "user" { Spacer(minLength: 48) }
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        if m.role == "user" {
-                                            Text(m.text)
-                                                .font(.system(size: 17))
-                                                .foregroundColor(WX.titleBlack)
-                                                .textSelection(.enabled)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 9)
-                                                .background(WX.bubbleMine)
-                                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                        } else if m.role == "tool" {
-                                            Text("🔧 \(m.text.prefix(600))")
-                                                .font(.system(size: 11, design: .monospaced))
-                                                .foregroundColor(WX.secondary)
-                                                .padding(8)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(RoundedRectangle(cornerRadius: 10).fill(WX.inputField).shadow(color: .black.opacity(0.05), radius: 1, y: 1))
-                                        } else {
-                                            Text(m.text.isEmpty ? (m.running ? "思考中…" : "") : m.text)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 4)
-                                        }
-                                        if agent.busy, m.running, m == agent.messages.last {
-                                            HStack(spacing: 6) {
-                                                ProgressView().scaleEffect(0.7)
-                                                Text(agent.status).font(.system(size: 11)).foregroundColor(WX.secondary)
-                                            }
-                                        }
-                                    }
-                                    if m.role != "user" { Spacer(minLength: 48) }
-                                }
-                                .id(m.id)
+                                AgentRow(m: m, showProgress: agent.busy && m.running, status: agent.status)
+                                    .id(m.id)
                             }
                         }
                         .padding(12)
