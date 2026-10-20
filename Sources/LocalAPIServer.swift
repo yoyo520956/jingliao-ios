@@ -60,7 +60,7 @@ final class LocalAPIServer: ObservableObject {
         guard !chainsLoaded else { return }
         chainsLoaded = true
         guard let d = UserDefaults.standard.data(forKey: "jl.chains"),
-              let arr = try? JSONDecoder().decode([String: ConvChain].self) else { return }
+              let arr = try? JSONDecoder().decode([String: ConvChain].self, from: d) else { return }
         chains = arr
         EngineLog.shared.add("已恢复 \(chains.count) 条会话链（重启不失忆）")
     }
