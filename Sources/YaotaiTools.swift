@@ -160,7 +160,7 @@ enum YaotaiTools {
         // 块结束标记：最后出现的 invoke/calls 关闭（带不带斜杠都认）；一个都没有=流式截断，块后无正文
         var blockEnd = ns.length
         if let r = lastCloseMarker(text, closers: ["</|DSML|calls>", "<|/DSML|calls>", "</|DSML|invoke>", "<|/DSML|invoke>", "<|DSML|invoke>", "<|DSML|calls>"]) {
-            blockEnd = text.distance(from: text.startIndex, to: r)
+            blockEnd = r
         }
 
         var calls: [ParsedToolCall] = []
