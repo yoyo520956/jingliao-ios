@@ -43,7 +43,8 @@ final class LocalAPIServer: ObservableObject {
 
     // ── 会话链：同一对话复用上游 DeepSeek session，后续轮只发新消息 ──
     // 根治两件事：①后续轮 prompt 不再滚雪球（不会被上游截断）②历史由上游会话自己保管 = 真记忆
-    private struct ConvChain {
+    // 落盘持久化：App 重启/重装后链还在，不会因为重启又变回“完整 prompt 被截断”
+    private struct ConvChain: Codable {
         var sessionID: String
         var lastMsgID: Int64
         var msgCount: Int
@@ -52,7 +53,22 @@ final class LocalAPIServer: ObservableObject {
     }
     private var chains: [String: ConvChain] = [:]
     private let chainLock = NSLock()
-    private final class MsgBox { var msgID: Int64 = 0 }
+    private var chainsLoaded = false
+    private final class MsgBox { var msgID: Int64 = 0; var usage: Int64 = 0 }
+
+    private func loadChains() {
+        guard !chainsLoaded else { return }
+        chainsLoaded = true
+        guard let d = UserDefaults.standard.data(forKey: "jl.chains"),
+              let arr = try? JSONDecoder().decode([String: ConvChain].self) else { return }
+        chains = arr
+        EngineLog.shared.add("已恢复 \(chains.count) 条会话链（重启不失忆）")
+    }
+
+    private func persistChains() {
+        guard let d = try? JSONEncoder().encode(chains) else { return }
+        UserDefaults.standard.set(d, forKey: "jl.chains")
+    }
 
     /// 从消息里抽正文（兼容 string / parts / input_text / 无 type / 纯 JSON 兜底）
     static func msgText(_ m: [String: Any]) -> String {
@@ -95,6 +111,39 @@ final class LocalAPIServer: ObservableObject {
         }.joined(separator: "\n\n")
     }
 
+    /// 超长 prompt 智能裁剪（首轮兜底）：系统人设头尾保留 + 首条用户消息 + 最近 4 条，目标 ≤2 万字符
+    /// （人设数万字时上游服务端会把中后部整段截掉，历史全丢——这是“失忆”的根因）
+    static func compactPrompt(_ messages: [[String: Any]]) -> String {
+        func tagLine(_ m: [String: Any]) -> String {
+            let role = m["role"] as? String ?? "user"
+            let tag = role == "assistant" ? "助手" : (role == "system" ? "系统" : (role == "tool" ? "工具" : "用户")
+            return "[\(tag)] \(msgText(m))"
+        }
+        let sysIdx = messages.firstIndex { ($0["role"] as? String) == "system" }
+        let sysText = sysIdx.map { msgText(messages[$0]) } ?? ""
+        var out: [String] = []
+        if !sysText.isEmpty {
+            let capped = sysText.count > 8000
+                ? String(sysText.prefix(4000)) + "\n……[系统人设过长，中部省略 \(sysText.count - 8000) 字]……\n" + String(sysText.suffix(4000))
+                : sysText
+            out.append("[系统] \(capped)")
+        }
+        let firstUserIdx = messages.firstIndex { ($0["role"] as? String) == "user" }
+        if let i = firstUserIdx {
+            out.append("[用户] \(String(msgText(messages[i]).prefix(1000)))")
+        }
+        var seen = Set<Int>()
+        if let i = sysIdx { seen.insert(i) }
+        if let i = firstUserIdx { seen.insert(i) }
+        let tail = messages.suffix(4)
+        for (off, m) in tail.enumerated() {
+            let real = messages.count - tail.count + off
+            if seen.contains(real) { continue }
+            out.append(tagLine(m))
+        }
+        return out.joined(separator: "\n\n")
+    }
+
     func start() {
         stop()
         let params = NWParameters.tcp
@@ -118,6 +167,8 @@ final class LocalAPIServer: ObservableObject {
         }
         l.start(queue: queue)
         listener = l
+        loadChains()
+        SilentAudio.shared.start()   // 切后台保活：服务不能随 App 挂起而死
         let lan = Self.lanIPv4.map { " / http://\($0):\(port)/v1（局域网）" } ?? ""
         EngineLog.shared.add("本地网关已启动 http://127.0.0.1:\(port)/v1\(lan)")
     }
@@ -126,6 +177,7 @@ final class LocalAPIServer: ObservableObject {
         listener?.cancel()
         listener = nil
         DispatchQueue.main.async { self.running = false }
+        SilentAudio.shared.stop()
     }
 
     // ── 一键自检：走真实 HTTP 回路，三种请求形态 ─────────────────────
@@ -327,7 +379,8 @@ final class LocalAPIServer: ObservableObject {
     /// 流式泵：跑一轮 completion，把事件转成 SSE chunk 吐出；返回 (有正文, 出错)
     private func pumpStream(
         _ conn: NWConnection, _ account: DSAccount, _ sid: String,
-        _ req: DSChatEngine.CompleteRequest, _ cid: String, _ model: String
+        _ req: DSChatEngine.CompleteRequest, _ cid: String, _ model: String,
+        _ box: MsgBox? = nil
     ) async -> (content: Bool, err: Bool) {
         var gotContent = false, gotErr = false
         do {
@@ -338,7 +391,9 @@ final class LocalAPIServer: ObservableObject {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": t], nil) + "\n\n")
                 case .thinkDelta(let t):
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["reasoning_content": t], nil) + "\n\n")
-                case .usage, .meta:
+                case .usage(let u):
+                    box?.usage = u     // SSE 上报的服务端真实累计 token
+                case .meta:
                     break
                 case .done(let fr):
                     if let fr, fr.hasPrefix("error:") {
@@ -356,14 +411,15 @@ final class LocalAPIServer: ObservableObject {
     }
 
     /// 非流式泵：跑一轮 completion，累计正文；返回 (正文, 思考, 错误)
-    private func pumpCollect(_ account: DSAccount, _ req: DSChatEngine.CompleteRequest) async -> (content: String, think: String, err: String) {
+    private func pumpCollect(_ account: DSAccount, _ req: DSChatEngine.CompleteRequest, _ box: MsgBox? = nil) async -> (content: String, think: String, err: String) {
         var content = "", think = "", err = ""
         do {
             for try await ev in engine.complete(req) {
                 switch ev {
                 case .thinkDelta(let t): think += t
                 case .contentDelta(let t): content += t
-                case .usage, .meta: break
+                case .usage(let u): box?.usage = u
+                case .meta: break
                 case .done(let fr):
                     if let fr, fr.hasPrefix("error:") { err = String(fr.dropFirst(6)) }
                 }
@@ -372,6 +428,80 @@ final class LocalAPIServer: ObservableObject {
             err = error.localizedDescription
         }
         return (content, think, err)
+    }
+
+    /// OpenAI 流式响应尾部的 usage chunk（choices 为空数组，客户端读真实用量）
+    private func usageJSON(_ id: String, _ model: String, promptTokens: Int, completionTokens: Int) -> String {
+        let obj: [String: Any] = [
+            "id": id, "object": "chat.completion.chunk",
+            "created": Int(Date().timeIntervalSince1970), "model": model,
+            "choices": [],
+            "usage": ["prompt_tokens": promptTokens, "completion_tokens": completionTokens,
+                      "total_tokens": promptTokens + completionTokens],
+        ]
+        return String(decoding: (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8), as: UTF8.self)
+    }
+
+    /// 官方 DeepSeek API 直通：原样转发客户端请求体（tools/thinking/stream 全支持），
+    /// SSE 原样回流——第三方 App 拿到的是和官方一致的完整能力
+    private func handleOfficial(_ conn: NWConnection, body: Data, json: [String: Any], key: String) async {
+        var out = json
+        // 网关私有字段清掉，官方不认识
+        out.removeValue(forKey: "thinking_enabled")
+        out.removeValue(forKey: "search_enabled")
+        if let m = out["model"] as? String, !m.contains("deepseek") { out["model"] = "deepseek-chat" }
+        let stream = (json["stream"] as? Bool) ?? false
+        let model = out["model"] as? String ?? "deepseek-chat"
+
+        EngineLog.shared.add("[网关] 官方直通 stream=\(stream) model=\(model)")
+
+        var req = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.httpBody = (try? JSONSerialization.data(withJSONObject: out)) ?? body
+        req.timeoutInterval = 300
+
+        do {
+            let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200..<300).contains(code) else {
+                var t = ""
+                for try await line in bytes.lines { t += line; if t.count > 300 { break } }
+                sendErr(conn, status: "502 Bad Gateway", msg: "官方 API HTTP \(code): \(t)")
+                conn.cancel()
+                return
+            }
+            if stream {
+                sendHead(conn, contentType: "text/event-stream")
+                // 原样转发 SSE 行（加回空行分隔），[DONE] 一起过去
+                sendRaw(conn, "data: " + Self.chunkRoleLine() + "\n\n")
+                var forwarded = 0
+                for try await line in bytes.lines {
+                    if line.isEmpty { continue }
+                    sendRaw(conn, line + "\n\n")
+                    forwarded += 1
+                }
+                EngineLog.shared.add("[网关] 官方直通转发 \(forwarded) 行")
+                sendAllThenClose(conn, [Data("data: [DONE]\n\n".utf8)])
+            } else {
+                var d = Data()
+                for try await byte in bytes { d.append(byte) }
+                EngineLog.shared.add("[网关] 官方直通响应 \(d.count)B")
+                sendRaw(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(d.count)\r\nConnection: close\r\n\r\n")
+                sendAllThenClose(conn, [d])
+            }
+        } catch {
+            sendErr(conn, status: "502 Bad Gateway", msg: "官方 API 失败: \(error.localizedDescription)")
+            conn.cancel()
+        }
+    }
+
+    private static func chunkRoleLine() -> String {
+        String(decoding: (try? JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl-direct", "object": "chat.completion.chunk", "created": Int(Date().timeIntervalSince1970),
+            "model": "deepseek-chat", "choices": [["index": 0, "delta": ["role": "assistant"], "finish_reason": NSNull()]],
+        ])) ?? Data("{}".utf8), as: UTF8.self)
     }
 
     private func handleChat(_ conn: NWConnection, body: Data, auth: String?) async {
@@ -383,6 +513,11 @@ final class LocalAPIServer: ObservableObject {
         guard let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
             sendErr(conn, status: "400 Bad Request", msg: "请求体不是 JSON")
             conn.cancel()
+            return
+        }
+        // 官方 API 直通模式：填了官方 Key 就走官方通道——工具调用/深度思考/真实 token 用量全支持
+        if let officialKey = UserDefaults.standard.string(forKey: "jl.officialkey"), !officialKey.isEmpty {
+            await handleOfficial(conn, body: body, json: json, key: officialKey)
             return
         }
         guard let account = DSAccountStore.shared.pickAvailable() else {
@@ -401,12 +536,11 @@ final class LocalAPIServer: ObservableObject {
         let cid = "chatcmpl-" + String(UUID().uuidString.prefix(8))
         let lastUser = Self.lastUserText(messages)
 
-        // 完整 prompt：正常全量；超 6 万字符时保留人设+首轮+最近几轮（防上游截断把当前问题也吃掉）
+        // 完整 prompt：正常全量；超 2 万字符走智能裁剪（人设数万字会被上游服务端截断，历史全丢）
         var fullPrompt = Self.assemblePrompt(messages)
-        let trimmed = fullPrompt.count > 60_000
-        if trimmed {
-            fullPrompt = Self.assemblePrompt(messages, keep: 8)
-            EngineLog.shared.add("[网关] prompt 超 6 万字符 → 保留人设+首轮+最近 4 条")
+        if fullPrompt.count > 20_000 {
+            EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 2 万 → 智能裁剪（人设头尾+首轮+最近 4 条）")
+            fullPrompt = Self.compactPrompt(messages)
         }
 
         // ── 会话链判定 ──
@@ -427,6 +561,7 @@ final class LocalAPIServer: ObservableObject {
             }
         }
         chainLock.unlock()
+        persistChains()
         let chained = reuse != nil
 
         EngineLog.shared.add("[网关] 请求 model=\(model) stream=\(stream) msgs=\(messages.count) chain=\(chained ? "复用" : "新建") fullLen=\(fullPrompt.count)")
@@ -461,13 +596,14 @@ final class LocalAPIServer: ObservableObject {
                     chains.removeValue(forKey: key)
                 }
                 chainLock.unlock()
+                persistChains()   // 落盘：重启/重装不失忆
             }
 
             if stream {
                 sendHead(conn, contentType: "text/event-stream")
                 // 首字节立刻发 role 增量，避免客户端的首包超时判定为空
                 sendRaw(conn, "data: " + chunkJSON(cid, model, ["role": "assistant"], nil) + "\n\n")
-                var r = await pumpStream(conn, account, sessionID, req, cid, model)
+                var r = await pumpStream(conn, account, sessionID, req, cid, model, box)
                 var activeSid = sessionID
 
                 // 兜底 1：链式轮失败/零正文 → 新会话 + 完整 prompt（上游会话过期就靠这层救）
@@ -480,7 +616,7 @@ final class LocalAPIServer: ObservableObject {
                             account: account, sessionID: sid2, parentMessageID: nil,
                             prompt: fullPrompt, thinking: thinking, search: search,
                             onMeta: { box.msgID = $0 })
-                        r = await pumpStream(conn, account, sid2, req2, cid, model)
+                        r = await pumpStream(conn, account, sid2, req2, cid, model, box)
                     }
                 }
 
@@ -507,16 +643,18 @@ final class LocalAPIServer: ObservableObject {
                 if !r.content && !r.err {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
                 }
-                EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无")")
+                EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无") tokens=\(box.usage)")
                 if r.content { saveChain(activeSid) }
-                // 统一收尾：先冲刷 stop + [DONE]，再真正关闭（防 cancel 丢数据）
+                // 统一收尾：stop → usage（真实 completion tokens + 估算 prompt tokens）→ [DONE]，冲刷后关闭
+                let promptEst = max(1, (chained ? lastUser.count : fullPrompt.count) / 2)
                 let tail: [Data] = [
                     Data(("data: " + chunkJSON(cid, model, [:], "stop") + "\n\n").utf8),
+                    Data(("data: " + usageJSON(cid, model, promptTokens: promptEst, completionTokens: Int(box.usage)) + "\n\n").utf8),
                     Data("data: [DONE]\n\n".utf8),
                 ]
                 sendAllThenClose(conn, tail)
             } else {
-                var res = await pumpCollect(account, req)
+                var res = await pumpCollect(account, req, box)
                 var activeSid = sessionID
                 // 兜底 1：链式失败/空 → 新会话完整 prompt
                 if chained && (res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !res.err.isEmpty) {
@@ -528,7 +666,7 @@ final class LocalAPIServer: ObservableObject {
                             account: account, sessionID: sid2, parentMessageID: nil,
                             prompt: fullPrompt, thinking: thinking, search: search,
                             onMeta: { box.msgID = $0 })
-                        res = await pumpCollect(account, req2)
+                        res = await pumpCollect(account, req2, box)
                     }
                 }
                 // 兜底 2：仍空且无错 → 裸用户消息
@@ -558,10 +696,14 @@ final class LocalAPIServer: ObservableObject {
                         "message": ["role": "assistant", "content": text, "reasoning_content": res.think],
                         "finish_reason": "stop",
                     ]],
-                    "usage": ["prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0],
+                    "usage": [
+                        "prompt_tokens": max(1, fullPrompt.count / 2),
+                        "completion_tokens": Int(box.usage),
+                        "total_tokens": max(1, fullPrompt.count / 2) + Int(box.usage),
+                    ],
                 ]
                 sendJSON(conn, obj)
-                EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count)")
+                EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count) tokens=\(box.usage)")
                 if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     saveChain(activeSid)
                 }
