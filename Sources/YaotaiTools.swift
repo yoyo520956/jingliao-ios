@@ -154,37 +154,50 @@ enum YaotaiTools {
             return nil
         }
         let ns = text as NSString
-        let full = NSRange(location: 0, length: ns.length)
-        let invokes = ir.matches(in: text, range: full)
+        let invokes = ir.matches(in: text, range: NSRange(location: 0, length: ns.length))
         guard !invokes.isEmpty else { return nil }
 
+        // 块结束标记：最后出现的 invoke/calls 关闭（带不带斜杠都认）；一个都没有=流式截断，块后无正文
+        var blockEnd = ns.length
+        if let r = lastCloseMarker(text, closers: ["</|DSML|calls>", "<|/DSML|calls>", "</|DSML|invoke>", "<|/DSML|invoke>", "<|DSML|invoke>", "<|DSML|calls>"]) {
+            blockEnd = text.distance(from: text.startIndex, to: r)
+        }
+
         var calls: [ParsedToolCall] = []
-        var coveredEnd = 0   // 已消费到的字符位置（用于剥除工具块）
         for (i, im) in invokes.enumerated() {
-            let name = im.range(at: 1)
             let regionStart = im.range.location + im.range.length
-            let regionEnd = (i + 1 < invokes.count) ? invokes[i + 1].range.location : ns.length
+            let regionEnd = min((i + 1 < invokes.count) ? invokes[i + 1].range.location : blockEnd, blockEnd)
             guard regionStart <= regionEnd else { continue }
             let region = ns.substring(with: NSRange(location: regionStart, length: max(0, regionEnd - regionStart)))
             let args = parseDSMLParams(region, regex: pr)
             calls.append(ParsedToolCall(id: "call_\(UUID().uuidString.prefix(8))_\(i)",
-                                        name: ns.substring(with: name), arguments: args))
-            coveredEnd = max(coveredEnd, regionEnd)
+                                        name: ns.substring(with: im.range(at: 1)), arguments: args))
         }
-        // 剥除：第一个 DSML 标记之前是正文，块之后（或截断）是尾巴
+
+        // 剥除：第一个 DSML 标记之前是正文，块结束标记之后是尾巴
         let cutFrom = text.range(of: "<|DSML")?.lowerBound ?? text.startIndex
-        var head = String(text[..<cutFrom])
-        // 关闭标记：最后的 invoke>/calls>（可能带斜杠也可能不带）
-        var tailStart = text.endIndex
-        for closer in ["</|DSML|calls>", "<|/DSML|calls>", "</|DSML|invoke>", "<|/DSML|invoke>", "<|DSML|invoke>", "<|DSML|calls>"] {
-            if let r = text.range(of: closer, options: .backwards), r.upperBound > coveredEnd {
-                tailStart = min(tailStart, r.upperBound)
+        let head = String(text[..<cutFrom]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail: String
+        if blockEnd < ns.length, blockEnd > 0 {
+            tail = ns.substring(from: blockEnd).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            tail = ""
+        }
+        return (calls, [head, tail].filter { !$0.isEmpty }.joined(separator: "\n"))
+    }
+
+    /// 所有关闭标记里取位置最靠后的一个（返回其 UTF-16 起始偏移）
+    private static func lastCloseMarker(_ text: String, closers: [String]) -> Int? {
+        var best: Int?
+        for c in closers {
+            var r = text.range(of: c)
+            while let rr = r {
+                let loc = text.distance(from: text.startIndex, to: rr.upperBound)
+                best = max(best ?? 0, loc)
+                r = text.range(of: c, range: rr.upperBound..<text.endIndex)
             }
         }
-        var tail = tailStart < text.endIndex ? String(text[tailStart...]) : ""
-        let beforeTrim = head.trimmingCharacters(in: .whitespacesAndNewlines)
-        let afterTrim = tail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (calls, [beforeTrim, afterTrim].filter { !$0.isEmpty }.joined(separator: "\n"))
+        return best
     }
 
     private static func parseDSMLParams(_ region: String, regex: NSRegularExpression) -> String {
@@ -195,7 +208,8 @@ enum YaotaiTools {
         for m in matches {
             let key = ns.substring(with: m.range(at: 1))
             let r2 = m.range(at: 2)
-            let asString = (r2.location != NSNotFound) ? (ns.substring(with: r2) == "true") : true
+            // string="true" → 原始字符串；缺省或 false → 参数体按 JSON 解析（DeepSeek DSML 规范）
+            let asString = (r2.location != NSNotFound) && (ns.substring(with: r2) == "true")
             let bodyStart = m.range.location + m.range.length
             // 参数体到下一个 parameter 关闭标记（带不带斜杠都认）
             var bodyEnd = ns.length
