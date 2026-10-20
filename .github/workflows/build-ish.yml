@@ -1,0 +1,59 @@
+name: build-ish
+
+# 冒烟：验证 macOS runner 能把 OpenMinis/ish-arm64（feature-arm64 分支）
+# 交叉编译成 iOS arm64 静态库 libish.a / libish_emu.a / libfakefs.a。
+# 产物供鲸聊 v3.0「真 Linux 终端」集成。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ish_ref:
+        description: 'ish-arm64 分支'
+        default: 'feature-arm64'
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain (meson/ninja/llvm/libarchive)
+        run: |
+          brew update >/dev/null 2>&1 || true
+          brew list meson >/dev/null 2>&1 || brew install meson ninja
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          brew list libarchive >/dev/null 2>&1 || brew install libarchive
+          meson --version && ninja --version && clang --version | head -1
+
+      - name: Clone ish-arm64
+        run: |
+          mkdir -p deps
+          git clone --depth 1 --branch "${{ github.event.inputs.ish_ref || 'feature-arm64' }}" \
+            https://github.com/OpenMinis/ish-arm64 deps/ish
+
+      - name: Build static libs
+        env:
+          PATH: /opt/homebrew/opt/llvm/bin:$PATH
+        run: |
+          chmod +x deps/build_ish.sh
+          ./deps/build_ish.sh release
+
+      - name: Upload libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ish-libs
+          path: |
+            deps/libs/
+            deps/include/
+            deps/resources/
+          if-no-files-found: error
+
+      - name: Upload build tree (debug fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ish-build-tree
+          path: deps/ish/build-ios/
+          if-no-files-found: warn
