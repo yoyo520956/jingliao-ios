@@ -23,6 +23,13 @@ struct ChatView: View {
                         Image(systemName: "plus.message")
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        PiPManager.shared.toggle()
+                    } label: {
+                        Image(systemName: PiPManager.shared.isActive ? "pip.exit" : "pip.enter")
+                    }
+                }
             }
         }
         .onChange(of: appState.openConversationID) { id in
