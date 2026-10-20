@@ -14,6 +14,7 @@ struct DeviceIDCaptureView: View {
     @State private var reloadTick = 0
     @State private var validated: Set<String> = []
     @State private var validating: Set<String> = []
+    @State private var failedLogged: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -25,13 +26,10 @@ struct DeviceIDCaptureView: View {
                     DSLoginWebView { msg in
                         Self.handle(msg,
                                     onDevice: { d in deviceID = d; gotDevice = true },
-                                    onCandidate: { t in
-                                        Task { await validateCandidate(t) }
+                                    onCandidate: { t, s in
+                                        Task { await validateCandidate(t, source: s) }
                                     },
-                                    onLog: { l in
-                                        logs.append(l)
-                                        if logs.count > 14 { logs.removeFirst(logs.count - 14) }
-                                    })
+                                    onLog: { l in appendLog(l) })
                     }
                     .id(reloadTick)
                     .frame(minHeight: 300)
@@ -153,19 +151,31 @@ struct DeviceIDCaptureView: View {
 
     // ── 候选验证：所有 token 候选先打 users/current 验真，过了才亮灯 ──
 
-    private func validateCandidate(_ raw: String) async {
+    private func validateCandidate(_ raw: String, source: String) async {
         let t = raw.trimmingCharacters(in: .whitespaces)
-        guard t.count > 30, t.count < 2000, !t.contains("{"), !t.contains(" "),
-              !validated.contains(t), !validating.contains(t) else { return }
+        guard t.count >= 15, t.count < 2000,
+              !validated.contains(t), !validating.contains(t),
+              !failedLogged.contains(t) else { return }
         validating.insert(t)
         defer { validating.remove(t) }
         let ok = await Self.checkToken(t, deviceID: deviceID)
+        let head = String(t.prefix(10))
         if ok {
             validated.insert(t)
             token = t
             userID = ""
             gotToken = true
+            appendLog("✓ 验证通过 [\(source)] len=\(t.count) head=\(head)…")
+        } else {
+            failedLogged.insert(t)
+            appendLog("✗ 候选失败 [\(source)] len=\(t.count) head=\(head)…")
         }
+    }
+
+    private func appendLog(_ l: String) {
+        guard logs.last != l else { return }
+        logs.append(l)
+        if logs.count > 14 { logs.removeFirst(logs.count - 14) }
     }
 
     static func checkToken(_ tok: String, deviceID: String) async -> Bool {
@@ -189,12 +199,11 @@ struct DeviceIDCaptureView: View {
                     let nameish = (name.contains("token") || name.contains("session") || name.contains("auth"))
                         && val.count > 20 && val.count < 2000 && !val.contains("{")
                     if jwtish || nameish {
-                        Task { await self.validateCandidate(val) }
+                        Task { await self.validateCandidate(val, source: "cookie:" + c.name) }
                     }
                 }
                 if !names.isEmpty {
-                    logs.append("cookie: " + names.joined(separator: ","))
-                    if logs.count > 14 { logs.removeFirst(logs.count - 14) }
+                    appendLog("cookie: " + names.joined(separator: ","))
                 }
             }
         }
@@ -203,7 +212,7 @@ struct DeviceIDCaptureView: View {
     // ── 消息分发 ─────────────────────────────────────────────────────
 
     static func handle(_ body: String, onDevice: @escaping (String) -> Void,
-                       onCandidate: @escaping (String) -> Void,
+                       onCandidate: @escaping (String, String) -> Void,
                        onLog: @escaping (String) -> Void) {
         if body.hasPrefix("__BODY__") {
             let payload = String(body.dropFirst(8))
@@ -215,7 +224,7 @@ struct DeviceIDCaptureView: View {
         } else if body.hasPrefix("__RESP__") {
             let payload = String(body.dropFirst(8))
             if let t = Self.tokenFromJSON(payload) {
-                onCandidate(t.0)
+                onCandidate(t.0, "登录响应")
             }
         } else if body.hasPrefix("__LS__") {
             let kv = String(body.dropFirst(6))
@@ -226,7 +235,7 @@ struct DeviceIDCaptureView: View {
                 let isJWT = val.hasPrefix("ey") && !val.contains("{") && val.count > 40
                 let isUserTokenKey = key.contains("usertoken")
                 if (isUserTokenKey || isJWT), val.count > 40, val.count < 2000, !val.contains("{") {
-                    onCandidate(val)
+                    onCandidate(val, "LS")
                 }
             }
         } else if body.hasPrefix("__LSD__") {
@@ -239,17 +248,38 @@ struct DeviceIDCaptureView: View {
                     onDevice(val)
                 }
             }
+        } else if body.hasPrefix("__LST__") {
+            let kv = String(body.dropFirst(7))
+            if let eq = kv.firstIndex(of: "=") {
+                let key = String(kv[..<eq])
+                var val = String(kv[kv.index(after: eq)...])
+                var src = "LS:" + key
+                // JSON 包裹的值（如缓存对象）先拆包提取 token/value 字段
+                if val.hasPrefix("{"), let d = val.data(using: .utf8),
+                   let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+                    if let inner = j["token"] as? String, !inner.isEmpty {
+                        val = inner
+                        src = "LS:" + key + ".token"
+                    } else if let inner = j["value"] as? String, !inner.isEmpty {
+                        val = inner
+                        src = "LS:" + key + ".value"
+                    }
+                }
+                if val.count >= 15, val.count <= 2000 {
+                    onCandidate(val, src)
+                }
+            }
         } else if body.hasPrefix("__LSJ__") {
             let kv = String(body.dropFirst(7))
             if let eq = kv.firstIndex(of: "=") {
                 let val = String(kv[kv.index(after: eq)...])
-                onCandidate(val)
+                onCandidate(val, "LSJWT:" + String(kv[..<eq]))
             }
         } else if body.hasPrefix("__AUTH__") {
             var t = String(body.dropFirst(8))
             if t.hasPrefix("Bearer ") { t = String(t.dropFirst(7)) }
             if t.count > 30, t.count < 2000, !t.contains("{"), !t.contains(" ") {
-                onCandidate(t)
+                onCandidate(t, "请求头")
             }
         } else if body.hasPrefix("__LSK__") {
             onLog("LS键: " + String(body.dropFirst(7)))
@@ -381,8 +411,7 @@ struct DSLoginWebView: UIViewRepresentable {
             var k = localStorage.key(i);
             if (!seen[k]) { seen[k] = 1; post('__LSK__' + k); }
             var v = String(localStorage.getItem(k) || '');
-            if (/token/i.test(k) && v.length > 20 && v.length < 2000) post('__LS__' + k + '=' + v);
-            if (v.indexOf('eyJ') === 0 && v.length > 40 && v.indexOf('{') < 0) post('__LSJ__' + k + '=' + v);
+            if (/token/i.test(k) && v.length > 15 && v.length < 4000) post('__LST__' + k + '=' + v);
             if (/device|shumei|_sm|fm/i.test(k) && v.length >= 20 && v.length <= 300 && v.indexOf('{') < 0) post('__LSD__' + k + '=' + v);
           }
         } catch(e){}
