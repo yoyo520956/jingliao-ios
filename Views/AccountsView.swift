@@ -4,6 +4,7 @@ struct AccountsView: View {
     @EnvironmentObject var store: DSAccountStore
     @State private var showAdd = false
     @State private var busyID = ""
+    @State private var recaptureTarget: DSAccount?
 
     var body: some View {
         NavigationStack {
@@ -29,8 +30,13 @@ struct AccountsView: View {
                             HStack {
                                 if busyID == a.id {
                                     ProgressView().scaleEffect(0.7)
+                                } else if a.token.isEmpty {
+                                    Button("登录") { Task { await login(a) } }
+                                        .buttonStyle(.bordered)
+                                        .font(.caption)
+                                        .disabled(a.password.isEmpty)
                                 } else {
-                                    Button("登录 / 刷新") { Task { await login(a) } }
+                                    Button("重新抓取登录态") { recaptureTarget = a }
                                         .buttonStyle(.bordered)
                                         .font(.caption)
                                 }
@@ -56,6 +62,18 @@ struct AccountsView: View {
             }
             .navigationTitle("账号")
             .sheet(isPresented: $showAdd) { AddAccountSheet() }
+            .sheet(item: $recaptureTarget) { target in
+                RecaptureSheet(account: target) { dev, tok, uid in
+                    var m = target
+                    if !dev.isEmpty { m.deviceID = dev }
+                    m.token = tok
+                    m.userID = uid
+                    m.muted = false
+                    m.muteUntil = 0
+                    store.update(m)
+                    EngineLog.shared.add("登录态已更新: \(m.display)")
+                }
+            }
         }
     }
 
@@ -90,6 +108,24 @@ struct AccountsView: View {
     }
 }
 
+struct RecaptureSheet: View {
+    let account: DSAccount
+    let onDone: (String, String, String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var deviceID = ""
+    @State private var token = ""
+    @State private var userID = ""
+
+    var body: some View {
+        DeviceIDCaptureView(deviceID: $deviceID, token: $token, userID: $userID)
+            .onDisappear {
+                if !token.isEmpty {
+                    onDone(deviceID, token, userID)
+                }
+            }
+    }
+}
+
 struct AddAccountSheet: View {
     @EnvironmentObject var store: DSAccountStore
     @Environment(\.dismiss) private var dismiss
@@ -100,6 +136,8 @@ struct AddAccountSheet: View {
     @State private var areaCode = "+86"
     @State private var password = ""
     @State private var deviceID = ""
+    @State private var token = ""
+    @State private var userID = ""
     @State private var showCapture = false
 
     var body: some View {
@@ -108,7 +146,17 @@ struct AddAccountSheet: View {
                 Section("备注") {
                     TextField("可选，如「小号1」", text: $label)
                 }
-                Section("登录方式") {
+                Section("网页登录导入（推荐）") {
+                    HStack {
+                        Text(token.isEmpty ? "未导入" : "已抓到登录态 ✓")
+                            .font(.caption)
+                            .foregroundColor(token.isEmpty ? Color.secondary : Color.green)
+                        Spacer()
+                        Button(token.isEmpty ? "去登录抓取" : "重新抓取") { showCapture = true }
+                            .buttonStyle(.bordered)
+                    }
+                }
+                Section("密码登录（可选，网页仅验证码时留空）") {
                     Picker("", selection: $useEmail) {
                         Text("邮箱").tag(true)
                         Text("手机号").tag(false)
@@ -147,10 +195,12 @@ struct AddAccountSheet: View {
                         a.areaCode = areaCode
                         a.password = password
                         if !deviceID.isEmpty { a.deviceID = deviceID }
+                        a.token = token
+                        a.userID = userID
                         store.add(a)
                         dismiss()
                     }
-                    .disabled(password.isEmpty || (useEmail ? email.isEmpty : mobile.isEmpty))
+                    .disabled(token.isEmpty && (password.isEmpty || (useEmail ? email.isEmpty : mobile.isEmpty)))
                 }
             }
             .navigationTitle("添加账号")
@@ -160,7 +210,7 @@ struct AddAccountSheet: View {
                 }
             }
             .sheet(isPresented: $showCapture) {
-                DeviceIDCaptureView(deviceID: $deviceID)
+                DeviceIDCaptureView(deviceID: $deviceID, token: $token, userID: $userID)
             }
         }
     }
