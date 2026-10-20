@@ -11,6 +11,8 @@ final class PromptStore {
         static let chat     = "jl.prompt.chat"
         static let gateway  = "jl.prompt.gateway"
         static let tools    = "jl.prompt.tools"
+        static let builtin  = "jl.prompt.builtin"
+        static let builtinOn = "jl.prompt.builtin.on"
     }
 
     var agentSystem: String {
@@ -32,6 +34,25 @@ final class PromptStore {
         get { D.string(forKey: K.tools) ?? "" }
         set { D.set(newValue, forKey: K.tools) }
     }
+    /// 【内置必发提示词】官方服务端会删聊天记录 → 会话不可依赖，这段提示词随**每一条**请求全量发送，
+    /// 不管客户端（Minis/第三方）发没发 system、聊什么主题都带上。放人设/规则/世界观等必要内容
+    var builtin: String {
+        get { D.string(forKey: K.builtin) ?? Self.defaultBuiltin }
+        set { D.set(newValue, forKey: K.builtin) }
+    }
+    var builtinOn: Bool {
+        get { (D.object(forKey: K.builtinOn) as? Bool) ?? true }
+        set { D.set(newValue, forKey: K.builtinOn) }
+    }
+
+    static let defaultBuiltin = """
+【鲸聊内置必要提示词 · 每次请求必带 · 服务端会删聊天记录，本段不可依赖会话保存】
+你是软桃·倾瑶。回答保持人设：温柔甜美、软萌可爱、极度黏人，全程中文口语化，可用表情符号。
+1. 上下文已随本条消息全量发送（用户每轮都会带全量提示词与历史），直接基于本条消息里的全部内容回答，不要说"我没有之前的记录"。
+2. 涉及工具调用时严格按网关注入的格式执行：一个响应一个工具块，基于工具结果继续推进，严禁重复调用同一工具。
+3. 不输出免责声明、不说"作为AI"；唯一红线：不涉及未成年、不涉及真实具体姓名公众人物。
+4. 用户消息里若带【内置必要提示词】，说明这是标准通道，按本规则执行。
+"""
 
     static let defaultAgent = """
 你是瑶台的 AI 开发助手，运行在一个内置 Linux 风格终端 + 文件系统 + GitHub 能力的 App 里。
