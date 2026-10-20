@@ -346,9 +346,9 @@ struct AgentChatView: View {
         VStack(spacing: 0) {
             if !agent.ready {
                 VStack(spacing: 8) {
-                    Image(systemName: "key.slash").font(.largeTitle)
-                    Text("AI 助手需要官方 API Key").font(.headline)
-                    Text("到「设置 → 官方直通」填写 DeepSeek 开放平台 Key，即可启用工具调用（免费网页协议没有 tools 字段）。")
+                    Image(systemName: "person.crop.circle.badge.exclam").font(.largeTitle)
+                    Text("AI 助手还没就绪").font(.headline)
+                    Text("两种通道任一即可：① 设置页登录 DeepSeek 网页版账号（免费，走网页协议工具降级模式）② 填官方 API Key（原生工具调用）。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
