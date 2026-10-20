@@ -22,15 +22,29 @@ final class DSPowSolver: NSObject, WKScriptMessageHandler {
         try await ensureReady()
         try await ensureWasm()
         guard let wv = self.webview else { throw DSError(message: "PoW WebView 未就绪") }
-        let js = "__solve(\(Self.jsString(c.challenge)), \(Self.jsString(c.salt)), \(c.expireAt), \(c.difficulty))"
-        let result = try await wv.evaluateJavaScript(js)
-        guard let dict = result as? [String: Any] else {
-            throw DSError(message: "PoW 返回异常: \(String(describing: result))")
+        // JS 侧强制 JSON.stringify 成字符串再回：字符串 100% 可桥接，
+        // 根治 WKError 5 "JavaScript execution returned a result of an unsupported type"（对象桥接偶发失败）
+        let js = "JSON.stringify((function(){try{return __solve(\(Self.jsString(c.challenge)), \(Self.jsString(c.salt)), \(c.expireAt), \(c.difficulty));}catch(e){return {error:String(e)};}})())"
+        var lastErr: Error = DSError(message: "PoW 求解失败")
+        for attempt in 1...3 {
+            do {
+                let result = try await wv.evaluateJavaScript(js)
+                let s = (result as? String) ?? String(describing: result)
+                guard let data = s.data(using: .utf8),
+                      let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                    throw DSError(message: "PoW 返回异常: \(s.prefix(80))")
+                }
+                if let e = dict["error"] as? String { throw DSError(message: "PoW 求解失败: \(e)") }
+                if let n = dict["answer"] as? NSNumber { return n.int64Value }
+                if let d = dict["answer"] as? Double { return Int64(d) }
+                throw DSError(message: "PoW 答案缺失")
+            } catch {
+                lastErr = error
+                // 桥接抖动/瞬时 JS 上下文问题：退避重试（300ms / 600ms）
+                if attempt < 3 { try? await Task.sleep(nanoseconds: 300_000_000 * UInt64(attempt)) }
+            }
         }
-        if let e = dict["error"] as? String { throw DSError(message: "PoW 求解失败: \(e)") }
-        if let n = dict["answer"] as? NSNumber { return n.int64Value }
-        if let d = dict["answer"] as? Double { return Int64(d) }
-        throw DSError(message: "PoW 答案缺失")
+        throw lastErr
     }
 
     // ── 准备 ────────────────────────────────────────────────────────
