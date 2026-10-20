@@ -109,14 +109,14 @@ final class AgentRunner: ObservableObject {
                 await MainActor.run { status = "执行工具 \(name) …" }
                 let result = execute(name, args)
                 await MainActor.run {
-                    if let i = messages.indices.last(where: { $0.running }) {
+                    if let i = messages.indices.last(where: { messages[$0].running }) {
                         messages[i].toolResults.append((name, result))
                     }
                     messages.append(Msg(role: "tool", text: result))
                 }
             }
             await MainActor.run {
-                if let i = messages.indices.last(where: { $0.running }) { messages[i].running = false }
+                if let i = messages.indices.last(where: { messages[$0].running }) { messages[i].running = false }
                 status = ""
             }
         }
