@@ -104,23 +104,51 @@ final class AgentRunner: ObservableObject {
         await webRound(wire)
     }
 
+    private func gatewayPost(_ body: [String: Any], port: UInt16? = nil) async throws -> Data {
+        let p = port ?? LocalAPIServer.shared.port
+        guard let url = URL(string: "http://127.0.0.1:\(p)/v1/chat/completions"),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else {
+            throw NSError(domain: "Yaotai", code: -1, userInfo: [NSLocalizedDescriptionKey: "网关地址无效（port=\(p)）"])
+        }
+        var lastErr: Error = NSError(domain: "Yaotai", code: -1, userInfo: [NSLocalizedDescriptionKey: "未知错误"])
+        // 网络抖动/连接丢失重试一次（-1005 常见于网关重启瞬间）
+        for attempt in 1...2 {
+            do {
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.httpBody = payload
+                req.timeoutInterval = 180
+                let (d, resp) = try await URLSession.shared.data(for: req)
+                if let h = resp as? HTTPURLResponse, h.statusCode >= 400 {
+                    lastErr = NSError(domain: "Yaotai", code: h.statusCode, userInfo: [NSLocalizedDescriptionKey: "网关返回 HTTP \(h.statusCode)"])
+                    continue
+                }
+                return d
+            } catch {
+                lastErr = error
+                if attempt == 1 { try? await Task.sleep(nanoseconds: 600_000_000) }
+            }
+        }
+        throw lastErr
+    }
+
     private func webRound(_ wire: [[String: Any]]) async {
+        // 瑶台 AI 助手必须过本地网关：没起就先拉起来（用户可能只开了聊天直连没开网关开关）
+        if !LocalAPIServer.shared.running {
+            LocalAPIServer.shared.start()
+            for _ in 0..<10 {
+                if LocalAPIServer.shared.running { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
         let body: [String: Any] = [
             "model": "deepseek-chat", "messages": wire,
             "tools": toolsSchema(), "tool_choice": "auto", "stream": false,
         ]
-        guard let url = URL(string: "http://127.0.0.1:\(LocalAPIServer.shared.port)/v1/chat/completions"),
-              let payload = try? JSONSerialization.data(withJSONObject: body) else {
-            await finish("网关地址无效"); return
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = payload
-        req.timeoutInterval = 180
         status = "思考中…"
         do {
-            let (d, _) = try await URLSession.shared.data(for: req)
+            let d = try await gatewayPost(body)
             let json = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
             if let e = json["error"] as? [String: Any], let m = e["message"] as? String {
                 await finish(m); return
@@ -157,7 +185,8 @@ final class AgentRunner: ObservableObject {
             status = ""
             await webRound(toolWire)
         } catch {
-            await finish("请求网关失败：\(error.localizedDescription)")
+            let code = (error as? URLError)?.code.rawValue ?? (error as NSError).code
+            await finish("请求网关失败（code \(code)｜网关\(LocalAPIServer.shared.running ? "运行中" : "未运行")｜端口 \(LocalAPIServer.shared.port)）：\(error.localizedDescription)")
         }
     }
 
