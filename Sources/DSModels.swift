@@ -39,7 +39,7 @@ struct DSChallenge {
             difficulty: (json["difficulty"] as? NSNumber)?.doubleValue ?? 0,
             expireAt: (json["expire_at"] as? NSNumber)?.doubleValue ?? 0,
             signature: json["signature"] as? String ?? "",
-            targetPath: json["target_path"] as? String ?? "/chat/completion")
+            targetPath: json["target_path"] as? String ?? "/api/v0/chat/completion")
         guard !c.challenge.isEmpty, !c.salt.isEmpty else { return nil }
         return c
     }
