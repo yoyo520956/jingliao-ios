@@ -8,6 +8,7 @@ struct SettingsView: View {
     @AppStorage("jl.apikeys") private var apiKeys = ""
     @State private var hifOn = DSHif.shared.enabled
     @State private var copied = false
+    @AppStorage("jl.officialkey") private var officialKey = ""
 
     var body: some View {
         NavigationStack {
@@ -89,6 +90,31 @@ struct SettingsView: View {
                     Text("本地网关（OpenAI / ChatGPT 官方格式）")
                 } footer: {
                     Text("在 Minis 等 OpenAI 兼容客户端里添加自定义模型：Base URL 填上面的地址（本机其他 App 用 127.0.0.1；同一 Wi-Fi 下的其他设备用局域网地址），Key 填上面任意一个（若已设置）。模型选 deepseek-chat。支持流式。")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("官方 API Key（可选）")
+                            .font(.body)
+                        Text(officialKey.isEmpty
+                             ? "未填写 → 走免费网页协议（纯聊天，无工具）"
+                             : "已填写 → 官方直通：工具调用 / 深度思考 / 真实 token 用量全部可用")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("DeepSeek 开放平台 Key（platform.deepseek.com 申请）；填写后第三方 App 的请求全部转发到 api.deepseek.com，原样支持 tools")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        TextField("sk-…（留空则关闭直通）", text: $officialKey)
+                            .font(.caption)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                } header: {
+                    Text("官方直通（想让 Minis 里的倾瑶能调工具就填它）")
+                } footer: {
+                    Text("免费网页协议的 completion 报文里根本没有 tools 字段——工具调用是它的天花板，不是网关的缺陷。填了官方 Key，网关就把第三方 App 的请求原样转发给官方 API：工具、思考、真实消耗全都有。Key 只存本机。")
                 }
 
                 Section {
