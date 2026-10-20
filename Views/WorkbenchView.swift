@@ -7,16 +7,39 @@ struct WorkbenchView: View {
     @StateObject private var agent = AgentRunner.shared
     @State private var tab = 0
 
+    private let subtabs: [(Int, String, String, String)] = [
+        (0, "终端", "ic_node", "run_command"),
+        (1, "AI 助手", "ic_robot", "agent_loop"),
+        (2, "文件", "ic_folder", "workbench_fs"),
+        (3, "网页", "ic_globe", "web_preview"),
+    ]
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("", selection: $tab) {
-                    Text("终端").tag(0)
-                    Text("AI 助手").tag(1)
-                    Text("文件").tag(2)
-                    Text("网页").tag(3)
+                // 微信风格分段选择器：圆角白条 + 绿字选中
+                HStack(spacing: 4) {
+                    ForEach(subtabs, id: \.0) { t in
+                        let on = tab == t.0
+                        Button {
+                            withAnimation(.easeOut(duration: 0.15)) { tab = t.0 }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(uiImage: uiIcon(t.2))
+                                    .renderingMode(.template)
+                                Text(t.1)
+                                    .font(.system(size: 14, weight: on ? .semibold : .regular))
+                            }
+                            .foregroundColor(on ? WX.green : WX.titleBlack)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 34)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(on ? WX.green.opacity(0.12) : Color.clear))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .pickerStyle(.segmented)
+                .padding(4)
+                .background(RoundedRectangle(cornerRadius: 9).fill(WX.inputField).shadow(color: .black.opacity(0.04), radius: 2, y: 1))
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
 
@@ -30,9 +53,14 @@ struct WorkbenchView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .background(WX.listBG)
             .navigationTitle("瑶台 · 开发环境")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+
+    private func uiIcon(_ name: String) -> UIImage {
+        return UIImage(named: name)?.withRenderingMode(.alwaysTemplate) ?? UIImage()
     }
 }
 
@@ -129,13 +157,14 @@ struct FileBrowserView: View {
         List {
             Section("目录：\(vm.path)") {
                 ForEach(vm.items) { it in
-                    HStack {
-                        Image(systemName: it.isDir ? "folder" : "doc.text")
-                            .foregroundColor(it.isDir ? .blue : .secondary)
+                    HStack(spacing: 10) {
+                        WXRowIcon(name: it.isDir ? "ic_folder" : (it.name.hasSuffix(".html") ? "ic_globe" : (it.name.hasSuffix(".js") ? "ic_code" : "ic_file")))
                         Text(it.name)
+                            .font(.system(size: 17))
+                            .foregroundColor(WX.titleBlack)
                         Spacer()
                         if !it.isDir {
-                            Text("\(it.size)B").font(.caption2).foregroundColor(.secondary)
+                            Text("\(it.size)B").font(.system(size: 12)).foregroundColor(WX.secondary)
                         }
                     }
                     .contentShape(Rectangle())
@@ -150,13 +179,18 @@ struct FileBrowserView: View {
             }
         }
         .listStyle(.plain)
+        .background(WX.listBG)
+        .scrollContentBackground(.hidden)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 if !vm.atRoot { Button("返回") { vm.up() } }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button { vm.newFile() } label: { Image(systemName: "plus") }
+                Button { vm.newFile() } label: {
+                    Image(uiImage: uiIcon("ic_plus_small")).renderingMode(.template)
+                        .foregroundColor(WX.titleBlack)
+                }
             }
         }
         .sheet(item: $vm.editing) { f in
@@ -169,7 +203,7 @@ struct FileBrowserView: View {
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarTrailing) {
-                            Button("保存") { vm.save(f) }
+                            Button("保存") { vm.save(f) }.foregroundColor(WX.green)
                         }
                         ToolbarItem(placement: .navigationBarLeading) {
                             Button("完成") { vm.editing = nil }
@@ -177,6 +211,10 @@ struct FileBrowserView: View {
                     }
             }
         }
+    }
+
+    private func uiIcon(_ name: String) -> UIImage {
+        return UIImage(named: name)?.withRenderingMode(.alwaysTemplate) ?? UIImage()
     }
 }
 
@@ -360,24 +398,38 @@ struct AgentChatView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(agent.messages) { m in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    if m.role == "user" {
-                                        Text(m.text)
-                                            .padding(10)
-                                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue))
-                                            .foregroundColor(.white)
-                                            .frame(maxWidth: .infinity, alignment: .trailing)
-                                    } else if m.role == "tool" {
-                                        Text("🔧 \(m.text.prefix(600))")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(.secondary)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(RoundedRectangle(cornerRadius: 10).fill(Color(.tertiarySystemFill)))
-                                    } else {
-                                        Text(m.text.isEmpty ? (m.running ? "思考中…" : "") : m.text)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                HStack(alignment: .top) {
+                                    if m.role == "user" { Spacer(minLength: 48) }
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        if m.role == "user" {
+                                            Text(m.text)
+                                                .font(.system(size: 17))
+                                                .foregroundColor(WX.titleBlack)
+                                                .textSelection(.enabled)
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 9)
+                                                .background(WX.bubbleMine)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        } else if m.role == "tool" {
+                                            Text("🔧 \(m.text.prefix(600))")
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(WX.secondary)
+                                                .padding(8)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(RoundedRectangle(cornerRadius: 10).fill(WX.inputField).shadow(color: .black.opacity(0.05), radius: 1, y: 1))
+                                        } else {
+                                            Text(m.text.isEmpty ? (m.running ? "思考中…" : "") : m.text)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .padding(.horizontal, 4)
+                                        }
+                                        if agent.busy, m.running, m == agent.messages.last {
+                                            HStack(spacing: 6) {
+                                                ProgressView().scaleEffect(0.7)
+                                                Text(agent.status).font(.system(size: 11)).foregroundColor(WX.secondary)
+                                            }
+                                        }
                                     }
+                                    if m.role != "user" { Spacer(minLength: 48) }
                                 }
                                 .id(m.id)
                             }
@@ -390,32 +442,34 @@ struct AgentChatView: View {
                 }
                 HStack(spacing: 8) {
                     TextField("让 AI 帮你操作瑶台…", text: $input)
-                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 17))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
                         .focused($focused)
                         .submitLabel(.send)
                         .onSubmit { send() }
                     Button {
                         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                     } label: {
-                        Image(systemName: "keyboard.chevron.chevron.down").foregroundColor(.secondary)
+                        Image(systemName: "keyboard.chevron.chevron.down")
+                            .foregroundColor(WX.titleBlack)
                     }
                     .buttonStyle(.borderless)
                     Button { send() } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 26))
+                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 28))
+                            .foregroundColor(input.isEmpty ? WX.secondary : WX.green)
                     }
                     .disabled(agent.busy || input.isEmpty)
                 }
-                .padding(10)
-                .background(Color(.secondarySystemBackground))
-                .overlay(alignment: .top) {
-                    if agent.busy {
-                        Text(agent.status.isEmpty ? "AI 运行中…" : agent.status)
-                            .font(.caption2)
-                            .padding(.top, 4)
-                    }
-                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(WX.inputBar)
+                .overlay(alignment: .top) { Rectangle().fill(WX.separator).frame(height: 0.5) }
             }
         }
+        .onAppear { focused = true }
     }
 
     private func send() {
