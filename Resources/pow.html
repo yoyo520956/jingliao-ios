@@ -74,6 +74,7 @@ window.__solve = function (challenge, salt, expireAt, difficulty) {
     return { answer: Math.trunc(value) };
   } catch (err) { return { error: String(err) }; }
 };
+window.__ready();
 </script>
 </body>
 </html>
