@@ -110,6 +110,8 @@ struct SettingsView: View {
                             .font(.caption)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                        Link("没有 Key？点这里去 platform.deepseek.com 申请 →", destination: URL(string: "https://platform.deepseek.com/api_keys")!)
+                            .font(.caption2)
                     }
                 } header: {
                     Text("官方直通（想让 Minis 里的倾瑶能调工具就填它）")
