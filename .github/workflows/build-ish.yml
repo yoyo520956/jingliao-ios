@@ -19,12 +19,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Toolchain (meson/ninja/llvm/libarchive)
+      - name: Toolchain (meson/ninja/libarchive; VDSO 用 Xcode 自带 clang)
         run: |
           brew update >/dev/null 2>&1 || true
           brew list meson >/dev/null 2>&1 || brew install meson ninja
-          brew list llvm >/dev/null 2>&1 || brew install llvm
           brew list libarchive >/dev/null 2>&1 || brew install libarchive
+          # 注意：不要 brew install llvm —— llvm formula 会连带编 z3 5.3.1，老代码过不了新 clang
           meson --version && ninja --version && clang --version | head -1
 
       - name: Clone ish-arm64
@@ -34,8 +34,6 @@ jobs:
             https://github.com/OpenMinis/ish-arm64 deps/ish
 
       - name: Build static libs
-        env:
-          PATH: /opt/homebrew/opt/llvm/bin:$PATH
         run: |
           chmod +x deps/build_ish.sh
           ./deps/build_ish.sh release
