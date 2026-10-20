@@ -41,6 +41,8 @@ final class ChatViewModel: ObservableObject {
     }
 
     func send() {
+        let prefix = PromptStore.shared.chatPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = prefix.isEmpty ? draft : prefix + "\n\n" + draft
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !busy else { return }
         ensureCurrent()
@@ -57,7 +59,7 @@ final class ChatViewModel: ObservableObject {
         let search = searchOn
         task = Task { [weak self] in
             await self?.run(convID: conv.id, placeholderID: placeholder.id,
-                            prompt: text, thinking: thinking, search: search)
+                            prompt: prompt, thinking: thinking, search: search)
         }
     }
 
