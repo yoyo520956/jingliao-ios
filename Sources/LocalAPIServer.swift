@@ -631,6 +631,15 @@ final class LocalAPIServer: ObservableObject {
         if !gwDefault.isEmpty, !messages.contains(where: { ($0["role"] as? String) == "system" }) {
             effective = [["role": "system", "content": gwDefault]] + messages
         }
+        // 【v2.0.7 内置必发】官方服务端会删聊天记录 → 会话不可依赖。
+        // 这段提示词存软件里，每一条请求（不管客户端是谁、聊什么、发没发 system）都全量拼在最前面
+        if PromptStore.shared.builtinOn {
+            let bi = PromptStore.shared.builtin.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !bi.isEmpty {
+                effective = [["role": "system", "content": bi]] + effective
+                EngineLog.shared.add("[网关] 内置必发提示词已注入（\(bi.count) 字）")
+            }
+        }
         let fullSource = effective
         var fullPrompt = Self.assemblePrompt(fullSource)
         if fullPrompt.count > 20_000 {
@@ -676,9 +685,10 @@ final class LocalAPIServer: ObservableObject {
         }
         chainLock.unlock()
         persistChains()
-        // 工具轮绝不走链式：链式只发新用户消息，工具定义/历史工具结果全丢 → 模型反复调同一个工具
-        // 有 tools 的请求永远带完整 prompt（首轮/续轮都是）
-        let chained = (reuse != nil) && toolDefs.isEmpty
+        // 【v2.0.7 无状态全量模式】官方服务端会删聊天记录 → 链式复用随时断链（工具上下文全丢、历史消失）。
+        // 改为每条请求都开全新会话 + 完整 prompt（上下文全量自带，与 Minis 行为一致），响应完成即删会话。
+        reuse = nil
+        let chained = false
 
         EngineLog.shared.add("[网关] 请求 model=\(model) stream=\(stream) msgs=\(messages.count) chain=\(chained ? "复用" : "新建") fullLen=\(fullPrompt.count)")
         if chained, let c = reuse {
@@ -776,6 +786,8 @@ final class LocalAPIServer: ObservableObject {
                     Data("data: [DONE]\n\n".utf8),
                 ]
                 sendAllThenClose(conn, tail)
+                // 无状态模式：响应交付完即删上游会话（官方本来也会删，主动删干净不占列表）
+                await engine.deleteSession(account: account, sessionID: activeSid)
             } else {
                 var res = await pumpCollect(account, req, box)
                 var activeSid = sessionID
@@ -852,6 +864,8 @@ final class LocalAPIServer: ObservableObject {
                 if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     saveChain(activeSid)
                 }
+                // 无状态模式：响应交付完即删上游会话
+                await engine.deleteSession(account: account, sessionID: activeSid)
             }
         } catch {
             sendErr(conn, status: "502 Bad Gateway", msg: error.localizedDescription)
