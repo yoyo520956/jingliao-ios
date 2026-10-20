@@ -1,6 +1,7 @@
 import Foundation
 import AVKit
 import UIKit
+import CoreMedia
 
 /// 系统级画中画悬浮窗：AVSampleBufferDisplayLayer 渲染实时监控面板
 /// 开启后可在其他 App / 主屏幕上查看实时消耗（每秒刷新）
@@ -15,7 +16,6 @@ final class PiPManager: NSObject, ObservableObject {
     private var hostView: UIView?
     private var timer: Timer?
     private var audioPlayer: AVAudioPlayer?
-    private var formatDesc: CMVideoFormatDescription?
 
     private let W = 960
     private let H = 540
@@ -58,7 +58,11 @@ final class PiPManager: NSObject, ObservableObject {
         controller = c
         layer = l
 
-        makeFormatDesc()
+        // timebase 归位：默认停在 0/rate=0，不推进的化 enqueue 的采样永不过期 → 黑屏
+        if let tb = l.controlTimebase {
+            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(tb, rate: 1.0)
+        }
 
         // 4. 每秒一帧监控面板
         timer?.invalidate()
@@ -99,46 +103,47 @@ final class PiPManager: NSObject, ObservableObject {
 
     // MARK: - 渲染
 
-    private func makeFormatDesc() {
-        var fd: CMVideoFormatDescription?
-        // 'BGRA' fourcc（kCMVideoCodecType_BGRA 未在 Swift 暴露，用字面量）
-        let codec: CMVideoCodecType = 0x42475241
-        let st = CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: codec,
-                                                width: Int32(W), height: Int32(H),
-                                                extensions: nil, formatDescriptionOut: &fd)
-        if st == noErr, let fd {
-            formatDesc = fd
-        } else {
-            EngineLog.shared.add("PiP 格式描述创建失败: \(st)")
-        }
-    }
-
     private func renderTick() {
-        guard let layer, let formatDesc else { return }
+        guard let layer else { return }
         if layer.status == .failed {
-            EngineLog.shared.add("PiP layer 失败，重置: \(String(describing: layer.error))")
+            EngineLog.shared.add("PiP layer 失败: \(String(describing: layer.error))")
             layer.flush()
         }
         let s = LiveStatsCenter.shared
         let image = Self.drawDashboard(contextChars: s.contextChars, contextTokens: s.contextTokensEstimate,
                                        roundChars: s.roundChars, speed: s.charsPerSec,
                                        usage: s.tokenUsage, generating: s.generating, roundCount: s.roundCount)
-        guard let pb = Self.pixelBuffer(from: image, width: W, height: H) else { return }
+        guard let pb = Self.pixelBuffer(from: image, width: W, height: H) else {
+            EngineLog.shared.add("PiP pixelBuffer 创建失败")
+            return
+        }
 
-        var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 1),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-            decodeTimeStamp: .invalid)
+        // 格式描述直接从 pixel buffer 生成，天然匹配（比字面 fourcc 稳）
+        var fd: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescriptionOut: &fd) == noErr,
+              let fd else {
+            EngineLog.shared.add("PiP formatDescription 创建失败")
+            return
+        }
+
+        // PTS 置 invalid + DisplayImmediately，layer 立即渲染（不依赖 timebase 推进）
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 1),
+                                        presentationTimeStamp: .invalid,
+                                        decodeTimeStamp: .invalid)
         var sb: CMSampleBuffer?
-        let st = CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb,
-                                                    dataReady: true, makeDataReadyCallback: nil, refcon: nil,
-                                                    formatDescription: formatDesc,
-                                                    sampleTiming: &timing, sampleBufferOut: &sb)
-        guard st == noErr, let sb else { return }
-        // DisplayImmediately 尽力设置（失败不影响：PTS 即当前主机时间）
-        if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
-            let m = arr as? NSMutableArray
-            (m?.firstObject as? NSMutableDictionary)?[kCMSampleAttachmentKey_DisplayImmediately as String] = true
+        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb,
+                                                       formatDescription: fd, sampleTiming: &timing,
+                                                       sampleBufferOut: &sb) == noErr,
+              let sb else {
+            EngineLog.shared.add("PiP sampleBuffer 创建失败")
+            return
+        }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
+           CFArrayGetCount(attachments) > 0 {
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dict,
+                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         }
         layer.enqueue(sb)
     }
