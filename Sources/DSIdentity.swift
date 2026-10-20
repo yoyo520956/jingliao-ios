@@ -70,6 +70,9 @@ enum DSHttp {
         if env.code != 0 {
             throw DSError(message: "上游错误 code=\(env.code) msg=\(env.msg)")
         }
+        if env.bizCode != 0 {
+            throw DSError(message: "上游业务错误 biz_code=\(env.bizCode) msg=\(env.bizMsg)")
+        }
         return env
     }
 }
