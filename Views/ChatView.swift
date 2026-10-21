@@ -20,13 +20,20 @@ struct ChatView: View {
             .navigationTitle(conv.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // 衬线书卷标题
+                ToolbarItem(placement: .principal) {
+                    Text(conv.title)
+                        .font(WX.MBF.serif(18))
+                        .foregroundColor(WX.titleBlack)
+                        .lineLimit(1)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         vm.newChat()
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 18))
-                            .foregroundColor(WX.titleBlack)
+                            .foregroundColor(WX.green)
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -61,14 +68,15 @@ struct ChatView: View {
                         VStack(spacing: 10) {
                             Image(systemName: "fish.fill")
                                 .font(.system(size: 44))
-                                .foregroundColor(WX.secondary)
-                            Text("鲸聊 · DeepSeek 免费直连")
-                                .font(.headline)
+                                .foregroundColor(WX.green)
+                            Text("鲸聊 · 一札新纸")
+                                .font(WX.MBF.serif(20))
                                 .foregroundColor(WX.titleBlack)
                             Text("到「账号」页登录网页版账号即可开聊；开「设置→本地网关」还能给其他 App 当 API 用。")
-                                .font(.footnote)
+                                .font(.system(size: 14))
                                 .foregroundColor(WX.secondary)
                                 .multilineTextAlignment(.center)
+                                .frame(maxWidth: 280)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 120)
@@ -103,8 +111,8 @@ struct ChatView: View {
                 .font(.system(size: 17))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.inputField))
+                .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                 .submitLabel(.send)
                 .onSubmit { vm.send() }
                 .overlay(alignment: .bottomLeading) {
@@ -132,8 +140,8 @@ struct ChatView: View {
                         .font(.system(size: 15))
                         .foregroundColor(WX.titleBlack)
                         .frame(width: 34, height: 32)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                 }
                 .buttonStyle(.borderless)
                 PhotosPicker(selection: $photoItem, matching: .images) {
@@ -141,8 +149,8 @@ struct ChatView: View {
                         .font(.system(size: 15))
                         .foregroundColor(WX.titleBlack)
                         .frame(width: 34, height: 32)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                 }
                 .buttonStyle(.borderless)
                 .onChange(of: photoItem) { item in
@@ -177,8 +185,8 @@ struct ChatView: View {
                 .font(.system(size: 12))
                 .foregroundColor(on ? .white : WX.titleBlack)
                 .frame(width: 42, height: 32)
-                .background(RoundedRectangle(cornerRadius: 8).fill(on ? WX.green : WX.inputField))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(on ? WX.green : WX.inputField))
+                .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
         }
         .buttonStyle(.borderless)
     }
@@ -198,8 +206,8 @@ struct Bubble: View {
                         .resizable()
                         .scaledToFill()
                         .frame(maxWidth: 180, maxHeight: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: WX.rowCorner))
+                        .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                 }
                 if !m.thinking.isEmpty {
                     DisclosureGroup(isExpanded: $showThink) {
@@ -217,7 +225,7 @@ struct Bubble: View {
                     HStack(alignment: .bottom, spacing: 6) {
                         Text(m.content)
                             .font(.system(size: 17))
-                            .foregroundColor(WX.titleBlack)
+                            .foregroundColor(WX.onInk)
                             .textSelection(.enabled)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
@@ -225,27 +233,15 @@ struct Bubble: View {
                             .frame(width: 6, height: 6)
                             .background(Color.white.opacity(0.0001))
                     }
+                    // 墨气泡：松烟墨底、宣纸字、直角 2pt 小圆角、无尾
                     .background(WX.bubbleMine)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(alignment: .bottomTrailing) {
-                        // 气泡小尾巴
-                        Path { p in
-                            p.move(to: CGPoint(x: 40, y: 0))
-                            p.addLine(to: CGPoint(x: 48, y: 0))
-                            p.addLine(to: CGPoint(x: 40, y: 6))
-                            p.closeSubpath()
-                        }
-                        .fill(WX.bubbleMine)
-                        .rotationEffect(.degrees(180))
-                        .offset(x: -4, y: -3)
-                        .frame(width: 48, height: 6)
-                    }
+                    .clipShape(RoundedRectangle(cornerRadius: WX.rowCorner))
                 } else if m.failed {
                     Text(m.content)
                         .font(.callout)
-                        .foregroundColor(WX.badgeRed)
+                        .foregroundColor(WX.green)
                         .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemFill)))
+                        .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.faintInk))
                 } else {
                     MarkdownText(text: m.content.isEmpty ? "…" : m.content)
                         .padding(4)
