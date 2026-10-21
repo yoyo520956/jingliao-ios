@@ -7,6 +7,21 @@ final class AppState: ObservableObject {
 
 @main
 struct JLApp: App {
+    init() {
+        // 札记体：全局导航栏标题改衬线（Songti SC），返回按钮用浓墨
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont(name: "Songti SC", size: 19)
+                ?? UIFont.systemFont(ofSize: 19, weight: .medium),
+            .foregroundColor: UIColor(red: 0x2C/255, green: 0x26/255, blue: 0x18/255, alpha: 1),
+        ]
+        UINavigationBar.appearance().titleTextAttributes = attrs
+        let large: [NSAttributedString.Key: Any] = [
+            .font: UIFont(name: "Songti SC", size: 30)
+                ?? UIFont.systemFont(ofSize: 30, weight: .bold),
+            .foregroundColor: UIColor(red: 0x2C/255, green: 0x26/255, blue: 0x18/255, alpha: 1),
+        ]
+        UINavigationBar.appearance().largeTitleTextAttributes = large
+    }
     @StateObject private var appState = AppState()
     @StateObject private var accounts = DSAccountStore.shared
     @StateObject private var chats = ChatStore.shared
