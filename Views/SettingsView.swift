@@ -24,7 +24,7 @@ struct SettingsView: View {
                         WX.rowContent {
                             WXRowIcon(name: "ic_gateway")
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("本地 API 网关").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                Text("本地 API 网关").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                                 Text(server.running
                                      ? "运行中 · http://127.0.0.1:\(server.port)/v1"
                                      : "已停止")
@@ -41,7 +41,7 @@ struct SettingsView: View {
                         }
                         WX.rowContent {
                             WXRowIcon(name: "ic_server_stack")
-                            Text("端口").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                            Text("端口").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                             Spacer(minLength: 6)
                             TextField("22217", text: $port)
                                 .keyboardType(.numberPad)
@@ -123,7 +123,7 @@ struct SettingsView: View {
                         WX.rowContent {
                             WXRowIcon(name: "ic_pip")
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("画中画实时监控").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                Text("画中画实时监控").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                                 Text(PiPManager.shared.pipRunning
                                      ? "悬浮窗运行中 · 每秒刷新"
                                      : PiPManager.shared.isActive ? "已开启 · 切后台自动进入" : "已关闭")
@@ -190,7 +190,7 @@ struct SettingsView: View {
                             WX.rowContent {
                                 WXRowIcon(name: "ic_prompt")
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("底层提示词").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                    Text("底层提示词").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                                     Text("AI 助手 / 聊天前缀 / 网关默认系统 / 工具说明，全部可改")
                                         .font(.system(size: 12))
                                         .foregroundColor(WX.secondary)
@@ -204,7 +204,7 @@ struct SettingsView: View {
                             WX.rowContent {
                                 WXRowIcon(name: "ic_prompt")
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("人设预设库").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                    Text("人设预设库").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                                     Text("倾瑶 / 翻译 / 程序员 / 客服 / 学习教练，一键切换")
                                         .font(.system(size: 12))
                                         .foregroundColor(WX.secondary)
@@ -339,13 +339,13 @@ struct SettingsView: View {
                     WXGroup {
                         WX.rowContent {
                             WXRowIcon(name: "ic_info")
-                            Text("版本").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                            Text("版本").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                             Spacer(minLength: 6)
                             Text(Self.version).font(.system(size: 15)).foregroundColor(WX.secondary)
                         }
                         WX.rowContent {
                             WXRowIcon(name: "ic_chip")
-                            Text("协议基线").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                            Text("协议基线").font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                             Spacer(minLength: 6)
                             Text("ds-free-api v0.5.1 对齐").font(.system(size: 15)).foregroundColor(WX.secondary)
                         }
@@ -385,7 +385,7 @@ struct SettingsView: View {
     private func addrRow(title: String, value: String) -> some View {
         WX.rowContent {
             WXRowIcon(name: "ic_lan")
-            Text(title).font(.system(size: 17)).foregroundColor(WX.titleBlack)
+            Text(title).font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
             Spacer(minLength: 6)
             Text(value)
                 .font(.system(size: 11, design: .monospaced))
