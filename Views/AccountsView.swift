@@ -80,7 +80,7 @@ struct AccountsView: View {
     private func accountRow(_ a: DSAccount, index: Int, count: Int) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(a.display).font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                Text(a.display).font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                 Spacer()
                 Text(a.statusText)
                     .font(.system(size: 11))
