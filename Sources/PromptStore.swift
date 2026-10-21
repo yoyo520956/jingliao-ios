@@ -5,7 +5,7 @@ import Foundation
 final class PromptStore {
     static let shared = PromptStore()
 
-    private let D = UserDefaults.standard
+    let D = UserDefaults.standard
     private enum K {
         static let agent    = "jl.prompt.agent"
         static let chat     = "jl.prompt.chat"
