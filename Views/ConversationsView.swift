@@ -33,13 +33,13 @@ struct ConversationsView: View {
                         appState.tab = 0
                     } label: {
                         HStack(spacing: 10) {
-                            // 头像：会话首字符
+                            // 头像：墨底钤印（松烟墨底 + 宣纸字 + 细框）
                             ZStack {
                                 RoundedRectangle(cornerRadius: 6)
-                                    .fill(WX.cellBG)
+                                    .fill(WX.bubbleMine)
                                 Text(String(c.title.prefix(1)))
-                                    .font(.system(size: 20, weight: .medium))
-                                    .foregroundColor(WX.titleBlack)
+                                    .font(WX.MBF.serif(20))
+                                    .foregroundColor(WX.onInk)
                             }
                             .frame(width: 46, height: 46)
                             .overlay(
@@ -48,7 +48,7 @@ struct ConversationsView: View {
                             )
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(c.title)
-                                    .font(.system(size: 17))
+                                    .font(WX.MBF.serif(17))
                                     .foregroundColor(WX.titleBlack)
                                     .lineLimit(1)
                                 Text(c.messages.last?.content ?? "…")
@@ -112,10 +112,10 @@ struct ConversationsView: View {
                     HStack(spacing: 18) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 17))
-                            .foregroundColor(WX.titleBlack)
+                            .foregroundColor(WX.green)
                         Image(systemName: "plus")
                             .font(.system(size: 18))
-                            .foregroundColor(WX.titleBlack)
+                            .foregroundColor(WX.green)
                     }
                 }
             }
