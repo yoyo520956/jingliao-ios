@@ -87,6 +87,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     var content: String = ""
     var thinking: String = ""
     var failed: Bool = false
+    var image: Data? = nil
     var at: Double = Date().timeIntervalSince1970
 }
 
