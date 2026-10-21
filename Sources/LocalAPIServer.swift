@@ -115,6 +115,19 @@ final class LocalAPIServer: ObservableObject {
         messages.contains { let r = $0["role"] as? String ?? ""; return r == "assistant" || r == "tool" }
     }
 
+    /// 从消息 content parts 里抽 image_url（OpenAI 格式：字符串或 {url:...}）
+    static func extractImageRefs(_ messages: [[String: Any]]) -> [String] {
+        var out: [String] = []
+        for m in messages {
+            guard let arr = m["content"] as? [[String: Any]] else { continue }
+            for p in arr where (p["type"] as? String) == "image_url" {
+                if let s = p["image_url"] as? String { out.append(s) }
+                else if let d = p["image_url"] as? [String: Any], let u = d["url"] as? String { out.append(u) }
+            }
+        }
+        return out
+    }
+
     /// 按 [系统]/[用户]/[助手]/[工具] 标签拼完整 prompt
     static func assemblePrompt(_ messages: [[String: Any]], keep: Int? = nil) -> String {
         let list: [[String: Any]]
@@ -419,6 +432,25 @@ final class LocalAPIServer: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
+            if path == "/v1/stats" {
+                // 小组件/客户端状态端点：本机可读，不走鉴权
+                let t = UsageStore.shared.todayTotal
+                let accs = DSAccountStore.shared.accounts
+                let now = Date().timeIntervalSince1970
+                let usable = accs.filter { !$0.token.isEmpty && (!$0.muted || $0.muteUntil <= now) }.count
+                self.sendJSON(conn, [
+                    "running": true,
+                    "port": self.port,
+                    "accounts": accs.count,
+                    "accountsUsable": usable,
+                    "todayRequests": t.count,
+                    "todayPrompt": t.prompt,
+                    "todayCompletion": t.completion,
+                    "todayTokens": t.prompt + t.completion,
+                    "clients": self.clients.count,
+                ])
+                return
+            }
             if path == "/v1/models" {
                 self.sendJSON(conn, [
                     "object": "list",
@@ -716,6 +748,36 @@ final class LocalAPIServer: ObservableObject {
             EngineLog.shared.add("[网关] 工具调用启用：\(toolDefs.count) 个工具（网页版协议降级模式，无需官方 Key）")
         }
 
+        // ── 图片多模态：content parts 里的 image_url → 上传官方 → ref_file_ids ──
+        var refFileIds: [String] = []
+        let imgRefs = Self.extractImageRefs(messages)
+        if !imgRefs.isEmpty {
+            for (i, src) in imgRefs.prefix(3).enumerated() {
+                do {
+                    let data: Data
+                    let mime: String
+                    if src.hasPrefix("data:") {
+                        guard let b64 = src.split(separator: ",").last,
+                              let d = Data(base64Encoded: String(b64)) else { continue }
+                        data = d
+                        mime = src.contains("image/png") ? "image/png" : (src.contains("image/webp") ? "image/webp" : "image/jpeg")
+                    } else if src.hasPrefix("http") {
+                        guard let u = URL(string: src) else { continue }
+                        var r2 = URLRequest(url: u); r2.timeoutInterval = 30
+                        let (d, _) = try await URLSession.shared.data(for: r2)
+                        data = d
+                        mime = "image/jpeg"
+                    } else { continue }
+                    guard data.count <= 8_000_000 else { throw DSError(message: "图片超过 8MB") }
+                    let fid = try await engine.uploadFile(account: account, filename: "img\(i + 1).jpg", mime: mime, data: data)
+                    refFileIds.append(fid)
+                } catch {
+                    EngineLog.shared.add("[网关] 图片\(i + 1) 上传失败：\(error.localizedDescription)")
+                }
+            }
+            EngineLog.shared.add("[网关] 图片多模态：\(refFileIds.count)/\(min(imgRefs.count, 3)) 张就绪")
+        }
+
         // ── 会话链判定 ──
         let key = Self.conversationKey(messages)
         chainLock.lock()
@@ -769,6 +831,7 @@ final class LocalAPIServer: ObservableObject {
                 // 链式轮只发新消息（历史在上游会话里）；首轮发完整 prompt
                 prompt: chained ? (lastUser.isEmpty ? fullPrompt : lastUser) : fullPrompt,
                 thinking: thinking, search: search,
+                refFileIds: refFileIds,
                 onMeta: { mid in
                     box.msgID = mid
                     EngineLog.shared.add("[网关] 上游响应 message id=\(mid)")
