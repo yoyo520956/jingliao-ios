@@ -89,7 +89,7 @@ struct PromptEditorView: View {
             TextEditor(text: $builtin)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(height: 200)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
             Button("恢复默认") { builtin = PromptStore.defaultBuiltin }
                 .font(.system(size: 14))
                 .foregroundColor(.white)
@@ -118,7 +118,7 @@ struct PromptEditorView: View {
             TextEditor(text: text)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(height: 160)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
             if showDefault {
                 Button("恢复默认") { text.wrappedValue = PromptStore.defaultAgent }
                     .font(.system(size: 14))
