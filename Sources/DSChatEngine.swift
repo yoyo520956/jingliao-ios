@@ -179,7 +179,59 @@ final class DSChatEngine {
         var prompt: String
         var thinking: Bool
         var search: Bool
+        var refFileIds: [String] = []
         var onMeta: ((Int64) -> Void)?
+    }
+
+    // MARK: 文件上传（图片多模态）
+
+    /// 上传图片 → 拿 file id → 轮询到 SUCCESS（对齐 ds-free-api upload_and_poll）
+    func uploadFile(account: DSAccount, filename: String, mime: String, data: Data) async throws -> String {
+        // ① PoW（target=/api/v0/file/upload_file）
+        let challenge = try await fetchChallenge(account: account, targetPath: "/api/v0/file/upload_file")
+        let answer = try await DSPowSolver.shared.solve(challenge)
+        var headers = DSIdentity(deviceID: account.deviceID)
+            .authedHeaders(site: "same-origin", token: account.token)
+        headers["X-Ds-Pow-Response"] = challenge.powResponseHeader(answer: answer)
+
+        // ② multipart POST /file/upload_file（字段名 file）
+        let boundary = "----JL\(UUID().uuidString.prefix(12))"
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".utf8))
+        body.append(Data("Content-Type: \(mime)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        headers["Content-Type"] = "multipart/form-data; boundary=\(boundary)"
+        let upURL = URL(string: DSConfig.apiBase + "/file/upload_file")!
+        let upReq = DSIdentity.request(upURL, method: "POST", headers: headers, timeout: 120)
+        // DSIdentity.request 带 jsonBody 才设 body，这里手动挂
+        var req = upReq
+        req.httpBody = body
+        let env = try await DSHttp.fetchJSON(req)
+        guard let fileId = env.bizData?.dstr("id") ?? env.data?.dstr("id"), !fileId.isEmpty else {
+            throw DSError(message: "图片上传失败：未取到文件 id")
+        }
+        EngineLog.shared.add("图片已上传 file_id=\(fileId.prefix(12))… 轮询处理状态")
+
+        // ③ 轮询 fetch_files 直到 SUCCESS（2s × 15 次）
+        let identity = DSIdentity(deviceID: account.deviceID)
+        for _ in 0..<15 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let fURL = URL(string: DSConfig.apiBase + "/file/fetch_files?file_ids=\(fileId)")!
+            let fReq = DSIdentity.request(fURL, method: "GET",
+                                          headers: identity.authedHeaders(site: "same-origin", token: account.token))
+            guard let fEnv = try? await DSHttp.fetchJSON(fReq),
+                  let files = fEnv.bizData?["files"] as? [[String: Any]] ?? fEnv.data?["files"] as? [[String: Any]],
+                  let f0 = files.first else { continue }
+            let st = f0.dstr("status")
+            if st == "SUCCESS" {
+                EngineLog.shared.add("图片处理完成 file_id=\(fileId.prefix(12))…")
+                return fileId
+            }
+            if st == "FAILED" { throw DSError(message: "图片处理失败（官方返回 FAILED）") }
+        }
+        throw DSError(message: "图片处理超时（30s 未就绪）")
     }
 
     // MARK: 会话管理
@@ -266,7 +318,7 @@ final class DSChatEngine {
             "chat_session_id": r.sessionID,
             "model_type": DSConfig.modelType,
             "prompt": r.prompt,
-            "ref_file_ids": [String](),
+            "ref_file_ids": r.refFileIds,
             "thinking_enabled": r.thinking,
             "search_enabled": r.search,
             "action": NSNull(),
