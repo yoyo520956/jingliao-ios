@@ -147,16 +147,34 @@ final class LocalAPIServer: ObservableObject {
         }.joined(separator: "\n\n")
     }
 
-    /// 超长 prompt 智能裁剪（首轮兜底）：系统人设头尾保留 + 首条用户消息 + 最近 4 条，目标 ≤2 万字符
-    /// （人设数万字时上游服务端会把中后部整段截掉，历史全丢——这是“失忆”的根因）
+    /// 超长 prompt 智能裁剪（首轮兜底）：系统人设头尾保留 + 首条用户消息 + 工具链全保留 + 最近对话
+    /// 历史教训：早期版本只留"最近4条"，把中间的 assistant「调用指令」裁掉只剩 [工具] 结果，
+    /// 模型看到结果却不知道谁调的 → 每轮再调一遍同样工具 → 死循环 14 次 → 上限流 → 上游返回空
     static func compactPrompt(_ messages: [[String: Any]]) -> String {
         func tagLine(_ m: [String: Any]) -> String {
             let role = m["role"] as? String ?? "user"
-            var tag = "用户"
-            if role == "assistant" { tag = "助手" }
-            else if role == "system" { tag = "系统" }
-            else if role == "tool" { tag = "工具" }
+            if role == "assistant" {
+                // assistant 带 tool_calls 的：必须显示调了哪些工具，否则调用链断裂
+                if let tcs = m["tool_calls"] as? [[String: Any]], !tcs.isEmpty {
+                    let names = tcs.compactMap { tc -> String? in
+                        guard let f = tc["function"] as? [String: Any],
+                              let n = f["name"] as? String else { return nil }
+                        let args = (f["arguments"] as? String ?? "")
+                            .replacingOccurrences(of: "\n", with: " ")
+                        return argBrief(args).isEmpty ? n : n + "(\(argBrief(args)))"
+                    }.joined(separator: " → ")
+                    let body = msgText(m)
+                    return "[助手] 调用工具：\(names)\(body.isEmpty ? "" : "\n\(body)")"
+                }
+                return "[助手] \(msgText(m))"
+            }
+            let tag = role == "system" ? "系统" : (role == "tool" ? "工具" : "用户")
             return "[\(tag)] \(msgText(m))"
+        }
+        // 参数摘要：content 里 JSON 的 arguments 太长，截断到 120 字
+        func argBrief(_ s: String) -> String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.count > 120 ? String(t.prefix(120)) + "…" : t
         }
         let sysIdx = messages.firstIndex { ($0["role"] as? String) == "system" }
         let sysText = sysIdx.map { msgText(messages[$0]) } ?? ""
@@ -174,6 +192,19 @@ final class LocalAPIServer: ObservableObject {
         var seen = Set<Int>()
         if let i = sysIdx { seen.insert(i) }
         if let i = firstUserIdx { seen.insert(i) }
+        // 工具轮：完整保留调用链（首个用户消息之后的全部 assistant/tool），防止上下文断裂导致重复调用
+        let hasTools = messages.contains { ($0["role"] as? String) ?? "" == "tool" }
+        if hasTools {
+            for (idx, m) in messages.enumerated() {
+                guard idx > (firstUserIdx ?? 0), !seen.contains(idx) else { continue }
+                let r = m["role"] as? String ?? ""
+                if r == "tool" || r == "assistant" {
+                    out.append(tagLine(m))
+                    seen.insert(idx)
+                }
+            }
+        }
+        // 其余情况：保留最近 4 条
         let tail = messages.suffix(4)
         for (off, m) in tail.enumerated() {
             let real = messages.count - tail.count + off
@@ -567,6 +598,12 @@ final class LocalAPIServer: ObservableObject {
             EngineLog.shared.add("[网关] 工具调用：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
         }
         _ = sid
+        // 诊断：零正文时把模型实际收到的内容 dump 出来——工具轮上下文在 prompt 尾部，只看前 200 字（人设）永远看不出问题
+        if !gotContent && !gotErr {
+            let tail = String(req.prompt.suffix(400)).replacingOccurrences(of: "\n", with: "⏎")
+            EngineLog.shared.add("[诊断] 零正文：模型可见正文合计 \(visibleText.count) 字（思考内容不在其内）；收到的 prompt 尾部 400 字：\(tail)")
+            EngineLog.shared.add("[诊断] prompt 全长 \(req.prompt.count) 字，工具注入段\(req.prompt.contains(YaotaiTools.TOOL_CALL_START) ? "在" : "不在")")
+        }
         return (gotContent, gotErr)
     }
 
@@ -737,15 +774,11 @@ final class LocalAPIServer: ObservableObject {
         }
 
         // ── 工具调用（网页版协议上的 function calling）──
-        // 有 tools 就注入调用指令（含格式规则/示例/工具定义）；tool 结果消息也编进 prompt
+        // 只注入调用指令；tool 结果消息已由 assemblePrompt/compactPrompt 按 [工具] 标签编进 prompt，不再重复拼
         let toolDefs = YaotaiTools.extractToolDefs(json)
         if !toolDefs.isEmpty {
-            let toolMsgs = messages.filter { ($0["role"] as? String) == "tool" }
-            if !toolMsgs.isEmpty {
-                fullPrompt += "\n\n" + toolMsgs.map { "[工具结果] \(Self.msgText($0))" }.joined(separator: "\n")
-            }
             fullPrompt += "\n\n" + YaotaiTools.buildInjection(json, funcs: toolDefs)
-            EngineLog.shared.add("[网关] 工具调用启用：\(toolDefs.count) 个工具（网页版协议降级模式，无需官方 Key）")
+            EngineLog.shared.add("[网关] 工具调用启用：\(toolDefs.count) 个工具（历史 tool 结果已在 prompt 内，不重复拼）")
         }
 
         // ── 图片多模态：content parts 里的 image_url → 上传官方 → ref_file_ids ──
@@ -813,7 +846,8 @@ final class LocalAPIServer: ObservableObject {
         if chained, let c = reuse {
             EngineLog.shared.add("[网关] 复用会话 sid=…\(c.sessionID.suffix(8)) 上轮msgID=\(c.lastMsgID) 上轮msgCount=\(c.msgCount)")
         }
-        EngineLog.shared.add("[网关] promptHead=\(String((chained ? lastUser : fullPrompt).prefix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
+        // promptTail：完整上下文/工具定义/最近工具结果都在尾部，前 200 字只是系统人设（对排查无用）
+        EngineLog.shared.add("[网关] prompt 尾部 200 字：\(String(fullPrompt.suffix(200)).replacingOccurrences(of: "\n", with: "⏎"))")
 
         do {
             let sessionID: String
