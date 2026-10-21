@@ -16,7 +16,7 @@ struct PresetListView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 WXRowIcon(name: "ic_prompt")
-                                Text(p.name).font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                Text(p.name).font(WX.MBF.serif(17)).foregroundColor(WX.titleBlack)
                                 Spacer(minLength: 6)
                                 Button("启用") {
                                     PromptStore.shared.applyPreset(p)
@@ -107,12 +107,12 @@ private struct PresetEditView: View {
                     TextField("如：软桃·倾瑶", text: $preset.name)
                         .font(.system(size: 15))
                         .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .background(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                     Text("提示词内容（将随每条请求全量发送）").font(.system(size: 12)).foregroundColor(WX.secondary)
                     TextEditor(text: $preset.content)
                         .font(.system(size: 12, design: .monospaced))
                         .frame(height: 300)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                 }
                 .padding(15)
             }
