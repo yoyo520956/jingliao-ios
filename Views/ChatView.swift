@@ -1,11 +1,13 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 /// 聊天页——微信 8.0.79 风格：灰底白/我的绿气泡、底部语音/表情/加号输入栏
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var chats: ChatStore
     @StateObject private var vm = ChatViewModel()
+    @State private var photoItem: PhotosPickerItem?
 
     var body: some View {
         NavigationStack {
@@ -105,6 +107,23 @@ struct ChatView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
                 .submitLabel(.send)
                 .onSubmit { vm.send() }
+                .overlay(alignment: .bottomLeading) {
+                    if let img = vm.pendingImage {
+                        Image(uiImage: img)
+                            .resizable().scaledToFill()
+                            .frame(width: 44, height: 44)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(alignment: .topTrailing) {
+                                Button { vm.pendingImage = nil } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.white)
+                                        .shadow(radius: 2)
+                                }
+                            }
+                            .offset(x: 8, y: -28)
+                    }
+                }
             VStack(spacing: 6) {
                 Button {
                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -117,6 +136,25 @@ struct ChatView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
                 }
                 .buttonStyle(.borderless)
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 15))
+                        .foregroundColor(WX.titleBlack)
+                        .frame(width: 34, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                }
+                .buttonStyle(.borderless)
+                .onChange(of: photoItem) { item in
+                    guard let item else { return }
+                    Task {
+                        if let data = try? await item.loadTransferable(type: Data.self),
+                           let img = UIImage(data: data) {
+                            vm.pendingImage = img
+                        }
+                    }
+                    photoItem = nil
+                }
                 Button {
                     if vm.busy { vm.stop() } else { vm.send() }
                 } label: {
@@ -155,6 +193,14 @@ struct Bubble: View {
         HStack(alignment: .top) {
             if m.role == "user" { Spacer(minLength: 52) }
             VStack(alignment: .leading, spacing: 6) {
+                if let d = m.image, let img = UIImage(data: d) {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: 180, maxHeight: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                }
                 if !m.thinking.isEmpty {
                     DisclosureGroup(isExpanded: $showThink) {
                         Text(m.thinking)
