@@ -440,7 +440,7 @@ final class LocalAPIServer: ObservableObject {
                 conn.cancel()
                 return
             }
-            await self.handleChat(conn, body: body, auth: auth, proto: proto, idemKey: ctx.headers["idempotency-key"])
+            await self.handleChat(conn, body: body, auth: auth, proto: proto, idemKey: ctx.headers["idempotency-key"], clientIP: ctx.clientIP)
         }
     }
 
@@ -636,7 +636,7 @@ final class LocalAPIServer: ObservableObject {
         await handleChat(conn, body: body, auth: auth, proto: .openai)
     }
 
-    private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind) async {
+    private func handleChat(_ conn: NWConnection, body: Data, auth: String?, proto: ProtoKind, clientIP: String = "本机") async {
         await handleChat(conn, body: body, auth: auth, proto: proto, idemKey: nil)
     }
 
@@ -834,11 +834,11 @@ final class LocalAPIServer: ObservableObject {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
                 }
                 EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无") tokens=\(box.usage)")
-                UsageStore.shared.log(prompt: promptEst, completion: Int(box.usage),
-                                      client: ctx.clientIP.isEmpty ? "本机" : ctx.clientIP, model: model)
                 if r.content { saveChain(activeSid) }
                 // 统一收尾：stop → usage（真实 completion tokens + 估算 prompt tokens）→ [DONE]，冲刷后关闭
                 let promptEst = max(1, (chained ? lastUser.count : fullPrompt.count) / 2)
+                UsageStore.shared.log(prompt: promptEst, completion: Int(box.usage),
+                                      client: clientIP.isEmpty ? "本机" : clientIP, model: model)
                 let tail: [Data] = [
                     Data(("data: " + chunkJSON(cid, model, [:], "stop") + "\n\n").utf8),
                     Data(("data: " + usageJSON(cid, model, promptTokens: promptEst, completionTokens: Int(box.usage)) + "\n\n").utf8),
@@ -921,7 +921,7 @@ final class LocalAPIServer: ObservableObject {
                 }
                 EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count) tokens=\(box.usage)")
                 UsageStore.shared.log(prompt: max(1, fullPrompt.count / 2), completion: Int(box.usage),
-                                      client: ctx.clientIP.isEmpty ? "本机" : ctx.clientIP, model: model)
+                                      client: clientIP.isEmpty ? "本机" : clientIP, model: model)
                 if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     saveChain(activeSid)
                 }
