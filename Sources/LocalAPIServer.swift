@@ -194,6 +194,7 @@ final class LocalAPIServer: ObservableObject {
         l.start(queue: queue)
         listener = l
         loadChains()
+        loadClients()
         SilentAudio.shared.start()   // 切后台保活：服务不能随 App 挂起而死
         let lan = Self.lanIPv4.map { " / http://\($0):\(port)/v1（局域网）" } ?? ""
         EngineLog.shared.add("本地网关已启动 http://127.0.0.1:\(port)/v1\(lan)")
@@ -338,6 +339,61 @@ final class LocalAPIServer: ObservableObject {
     }
     // ── 路由 ─────────────────────────────────────────────────────────
 
+    // ── 网关客户端监控：谁在连、连了多少次 ──────────────────────────────
+
+    struct GatewayClient: Codable, Identifiable, Equatable {
+        var id: String { ip }
+        var ip: String
+        var ua: String
+        var requests: Int
+        var lastAt: Double
+    }
+
+    @Published var clients: [GatewayClient] = []
+    private var clientMap: [String: GatewayClient] = [:]
+    private let clientsFileKey = "jl.clients"
+
+    private func loadClients() {
+        if let d = UserDefaults.standard.data(forKey: clientsFileKey),
+           let arr = try? JSONDecoder().decode([GatewayClient].self, from: d) {
+            clientMap = Dictionary(uniqueKeysWithValues: arr.map { ($0.ip, $0) })
+            clients = arr.sorted { $0.lastAt > $1.lastAt }
+        }
+    }
+
+    private func persistClients() {
+        if let d = try? JSONEncoder().encode(Array(clientMap.values)) {
+            UserDefaults.standard.set(d, forKey: clientsFileKey)
+        }
+    }
+
+    private func noteClient(_ conn: NWConnection, ctx: ConnCtx) {
+        let ip: String
+        switch conn.endpoint {
+        case let .hostPort(host, _):
+            switch host {
+            case let .ipv4(a): ip = "\(a)"
+            case let .ipv6(a): ip = "\(a)"
+            case let .name(n, _): ip = n
+            @unknown default: ip = "未知"
+            }
+        default:
+            ip = "未知"
+        }
+        ctx.clientIP = ip
+        let ua = ctx.headers["user-agent"] ?? ""
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            var c = self.clientMap[ip] ?? GatewayClient(ip: ip, ua: "", requests: 0, lastAt: 0)
+            c.requests += 1
+            c.lastAt = Date().timeIntervalSince1970
+            if !ua.isEmpty { c.ua = ua }
+            self.clientMap[ip] = c
+            self.clients = self.clientMap.values.sorted { $0.lastAt > $1.lastAt }
+            self.persistClients()
+        }
+    }
+
     private func dispatch(_ conn: NWConnection, ctx: ConnCtx, body: Data) {
         var path = ctx.path.split(separator: "?").first.map(String.init) ?? ctx.path
         // Minis 默认会把 /v1 追加到 Base URL 后面；用户若已填 /v1 会变成 /v1/v1/...
@@ -349,6 +405,7 @@ final class LocalAPIServer: ObservableObject {
         let auth = ctx.headers["authorization"]
         // 全量入口日志：不管路径对不对，先留痕（排查"请求没到网关"）
         EngineLog.shared.add("[网关] 收到 \(ctx.method) \(path)（body \(body.count)B）")
+        noteClient(conn, ctx: ctx)
 
         // ── 幂等重放：带 Idempotency-Key 的请求，同 key 直接回放上次响应 ──
         if let idemKey = ctx.headers["idempotency-key"], !idemKey.isEmpty {
@@ -777,6 +834,8 @@ final class LocalAPIServer: ObservableObject {
                     sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
                 }
                 EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无") tokens=\(box.usage)")
+                UsageStore.shared.log(prompt: promptEst, completion: Int(box.usage),
+                                      client: ctx.clientIP.isEmpty ? "本机" : ctx.clientIP, model: model)
                 if r.content { saveChain(activeSid) }
                 // 统一收尾：stop → usage（真实 completion tokens + 估算 prompt tokens）→ [DONE]，冲刷后关闭
                 let promptEst = max(1, (chained ? lastUser.count : fullPrompt.count) / 2)
@@ -861,6 +920,8 @@ final class LocalAPIServer: ObservableObject {
                     idempotencyStore(idem, d)
                 }
                 EngineLog.shared.add("[网关] 完成 stream=0 contentLen=\(text.count) tokens=\(box.usage)")
+                UsageStore.shared.log(prompt: max(1, fullPrompt.count / 2), completion: Int(box.usage),
+                                      client: ctx.clientIP.isEmpty ? "本机" : ctx.clientIP, model: model)
                 if !res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     saveChain(activeSid)
                 }
@@ -882,4 +943,5 @@ final class ConnCtx {
     var method = ""
     var path = ""
     var headers: [String: String] = [:]
+    var clientIP = ""
 }
