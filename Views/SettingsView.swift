@@ -141,6 +141,47 @@ struct SettingsView: View {
                     }
                     groupFooter("开启后显示实时上下文、本轮输出与字/秒、服务端累计 token 消耗，每秒刷新；可最小化到主屏幕或其他 App 上悬浮查看。")
 
+                    groupHeader("Token 用量统计")
+                    WXGroup {
+                        UsagePanel()
+                    }
+                    groupFooter("统计所有走网关的请求（含 Minis / 局域网设备）。数据只存本机。")
+
+                    groupHeader("网关客户端监控")
+                    WXGroup {
+                        if server.clients.isEmpty {
+                            Text("暂无客户端接入（开启网关后，Minis 或局域网设备一连上就会出现在这里）")
+                                .font(.system(size: 12))
+                                .foregroundColor(WX.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 15)
+                                .padding(.vertical, 12)
+                        } else {
+                            ForEach(server.clients.prefix(8)) { cl in
+                                HStack(spacing: 10) {
+                                    WXRowIcon(name: "ic_lan")
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(cl.ip).font(.system(size: 15)).foregroundColor(WX.titleBlack)
+                                        Text(cl.ua.isEmpty ? "未知客户端" : String(cl.ua.prefix(42)))
+                                            .font(.system(size: 11))
+                                            .foregroundColor(WX.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 6)
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text("\(cl.requests) 次")
+                                            .font(.system(size: 13)).foregroundColor(WX.green)
+                                        Text(Self.clientTime(cl.lastAt))
+                                            .font(.system(size: 10)).foregroundColor(WX.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 15)
+                                .padding(.vertical, 10)
+                            }
+                        }
+                    }
+                    groupFooter("实时显示哪些 IP / App 在调用网关、各调用了多少次、最近活跃时间。")
+
                     groupHeader("瑶台开发环境")
                     WXGroup {
                         NavigationLink {
@@ -151,6 +192,20 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("底层提示词").font(.system(size: 17)).foregroundColor(WX.titleBlack)
                                     Text("AI 助手 / 聊天前缀 / 网关默认系统 / 工具说明，全部可改")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(WX.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        NavigationLink {
+                            PresetListView()
+                        } label: {
+                            WX.rowContent {
+                                WXRowIcon(name: "ic_prompt")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("人设预设库").font(.system(size: 17)).foregroundColor(WX.titleBlack)
+                                    Text("倾瑶 / 翻译 / 程序员 / 客服 / 学习教练，一键切换")
                                         .font(.system(size: 12))
                                         .foregroundColor(WX.secondary)
                                 }
@@ -347,6 +402,13 @@ struct SettingsView: View {
 
     private func showChevronFalse() -> some View {
         EmptyView()
+    }
+
+    static func clientTime(_ t: Double) -> String {
+        guard t > 0 else { return "—" }
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date(timeIntervalSince1970: t))
     }
 
     static var version: String {
