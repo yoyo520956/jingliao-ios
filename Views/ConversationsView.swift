@@ -5,6 +5,8 @@ struct ConversationsView: View {
     @EnvironmentObject var chats: ChatStore
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
+    @State private var shareItems: [Any] = []
+    @State private var sharing = false
 
     private var sorted: [Conversation] {
         let arr = chats.conversations.sorted { $0.updatedAt > $1.updatedAt }
@@ -67,6 +69,31 @@ struct ConversationsView: View {
                         .padding(.vertical, 2)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            if let url = ChatExport.tempFile(c) {
+                                shareItems = [url]
+                                sharing = true
+                            }
+                        } label: {
+                            Label("导出 Markdown", systemImage: "doc.text")
+                        }
+                        Button {
+                            Task { @MainActor in
+                                if let img = ChatExport.longImage(c) {
+                                    shareItems = [img]
+                                    sharing = true
+                                }
+                            }
+                        } label: {
+                            Label("生成长图分享", systemImage: "photo.on.rectangle")
+                        }
+                        Button(role: .destructive) {
+                            chats.remove(c.id)
+                        } label: {
+                            Label("删除会话", systemImage: "trash")
+                        }
+                    }
                     .listRowBackground(WX.cellBG)
                     .listRowSeparator(.hidden)
                 }
@@ -94,6 +121,9 @@ struct ConversationsView: View {
             }
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic),
                         prompt: "搜索会话")
+            .sheet(isPresented: $sharing) {
+                ShareSheet(items: shareItems)
+            }
         }
     }
 
