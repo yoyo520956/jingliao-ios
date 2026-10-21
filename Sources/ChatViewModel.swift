@@ -51,7 +51,7 @@ final class ChatViewModel: ObservableObject {
         var imageData: Data? = nil
         if let img {
             var d = img.jpegData(compressionQuality: 0.8)
-            if let d, d.count > 1_500_000, let smaller = img.jpegData(compressionQuality: 0.5) { d = smaller }
+            if let dd = d, dd.count > 1_500_000, let smaller = img.jpegData(compressionQuality: 0.5) { d = smaller }
             imageData = d
         }
         let prompt: String
