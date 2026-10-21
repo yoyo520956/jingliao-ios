@@ -380,7 +380,7 @@ struct AgentEmptyState: View {
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "person.crop.circle.badge.exclam").font(.largeTitle)
-            Text("AI 助手还没就绪").font(.headline)
+            Text("AI 助手还没就绪").font(WX.MBF.serif(20))
             Text("两种通道任一即可：① 设置页登录 DeepSeek 网页版账号（免费，走网页协议工具降级模式）② 填官方 API Key（原生工具调用）。")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -408,7 +408,7 @@ struct AgentRow: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 9)
                         .background(WX.bubbleMine)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: WX.rowCorner))
                 } else if m.role == "tool" {
                     Text("🔧 \(m.text.prefix(600))")
                         .font(.system(size: 11, design: .monospaced))
@@ -464,8 +464,8 @@ struct AgentChatView: View {
                         .font(.system(size: 17))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(WX.inputField))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(WX.separator, lineWidth: 0.5))
+                        .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.inputField))
+                        .overlay(RoundedRectangle(cornerRadius: WX.rowCorner).stroke(WX.separator, lineWidth: 0.5))
                         .focused($focused)
                         .submitLabel(.send)
                         .onSubmit { send() }
