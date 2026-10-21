@@ -13,13 +13,13 @@ extension PromptStore {
 
     var presets: [PersonaPreset] {
         get {
-            if let d = D.data(forKey: presetsKey),
+            if let d = D.data(forKey: Self.presetsKey),
                let a = try? JSONDecoder().decode([PersonaPreset].self, from: d), !a.isEmpty {
                 return a
             }
             return Self.defaultPresets
         }
-        set { D.set(try? JSONEncoder().encode(newValue), forKey: presetsKey) }
+        set { D.set(try? JSONEncoder().encode(newValue), forKey: Self.presetsKey) }
     }
 
     /// 启用预设 = 直接替换内置必发提示词并确保开关打开
