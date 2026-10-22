@@ -39,7 +39,7 @@ final class PiPManager: NSObject, ObservableObject {
         // 2. 渲染层 + 宿主视图（isHidden 必须为 false，用 1x1 alpha 0.01 微窗，用户无感但层是活的）
         let l = AVSampleBufferDisplayLayer()
         l.videoGravity = .resizeAspect
-        l.opaque = true
+        l.isOpaque = true
         l.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1).cgColor
         l.frame = CGRect(x: 0, y: 0, width: W, height: H)
         let v = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
