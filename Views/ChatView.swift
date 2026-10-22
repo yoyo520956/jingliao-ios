@@ -328,10 +328,10 @@ final class TTSController {
         u.rate = 0.5
         u.pitchMultiplier = 1.0
         u.volume = 1.0
-        u.pre utteranceDidFinish = { [weak self] _ in
+        u.`pre utteranceDidFinish` = { [weak self] _ in
             DispatchQueue.main.async { self?.isSpeaking = false }
         }
-        u.pre utteranceWillCancel = { [weak self] _ in
+        u.`pre utteranceWillCancel` = { [weak self] _ in
             DispatchQueue.main.async { self?.isSpeaking = false }
         }
         isSpeaking = true
