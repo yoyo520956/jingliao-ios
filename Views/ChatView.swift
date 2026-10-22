@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
-import AVSpeech
+import AVFoundation
 
 /// 聊天页——微信 8.0.79 风格：灰底白/我的绿气泡、底部语音/表情/加号输入栏
 struct ChatView: View {
