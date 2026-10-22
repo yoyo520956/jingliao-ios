@@ -3,8 +3,8 @@ import AVKit
 import UIKit
 import CoreMedia
 
-/// 系统级画中画悬浮窗：AVSampleBufferDisplayLayer 渲染实时监控面板
-/// 开启后可在其他 App / 主屏幕上查看实时消耗（每秒刷新）
+/// 系统级画中画悬浮窗：AVSampleBufferDisplayLayer 渲染实时监控面板（实时日志 + 时间 + 数据）
+/// 修复：PTS 改为递增时间戳（旧版 invalid+DisplayImmediately 在系统 PiP 里不渲染 → 全黑）
 final class PiPManager: NSObject, ObservableObject {
     static let shared = PiPManager()
 
@@ -34,19 +34,17 @@ final class PiPManager: NSObject, ObservableObject {
         } catch {
             EngineLog.shared.add("PiP 音频会话失败: \(error.localizedDescription)")
         }
-        startSilentAudio()
+        SilentAudio.shared.start()
 
-        // 2. 渲染层 + 宿主视图挂到 keyWindow
-        // 注意：宿主视图必须 isHidden=false（iOS 15+ 对完全隐藏的宿主层会黑屏）；
-        // 用 1x1 + alpha 0.01 的「可见但不可见」微窗贴在屏幕左下角，用户无感但层是活的
+        // 2. 渲染层 + 宿主视图（isHidden 必须为 false，用 1x1 alpha 0.01 微窗，用户无感但层是活的）
         let l = AVSampleBufferDisplayLayer()
         l.videoGravity = .resizeAspect
+        l.opaque = true
+        l.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1).cgColor
         l.frame = CGRect(x: 0, y: 0, width: W, height: H)
-        l.backgroundColor = UIColor(red: 0.04, green: 0.07, blue: 0.13, alpha: 1).cgColor
         let v = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
         v.backgroundColor = .black
         v.alpha = 0.01
-        v.clipsToBounds = true
         v.layer.addSublayer(l)
         if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
            let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
@@ -59,18 +57,18 @@ final class PiPManager: NSObject, ObservableObject {
         // 3. PiP 控制器
         let cs = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: l, playbackDelegate: self)
         let c = AVPictureInPictureController(contentSource: cs)
-        c.canStartPictureInPictureAutomaticallyFromInline = true   // 切后台自动进 PiP
+        c.canStartPictureInPictureAutomaticallyFromInline = true
         c.delegate = self
         controller = c
         layer = l
 
-        // timebase 归位：默认停在 0/rate=0，不推进的化 enqueue 的采样永不过期 → 黑屏
+        // 4. timebase 归位 + 推进（每帧都会推进，保证 sample 不过期）
         if let tb = l.controlTimebase {
-            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
             CMTimebaseSetRate(tb, rate: 1.0)
+            CMTimebaseSetTime(tb, time: .zero)
         }
 
-        // 4. 每秒一帧监控面板
+        // 5. 每秒一帧监控面板
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.renderTick()
@@ -100,31 +98,34 @@ final class PiPManager: NSObject, ObservableObject {
         controller = nil
         hostView?.removeFromSuperview()
         hostView = nil
-        // 网关还在跑就继续保活
         if !LocalAPIServer.shared.running { SilentAudio.shared.stop() }
         isActive = false
         pipRunning = false
         EngineLog.shared.add("PiP 监控已关闭")
     }
+}
+// MARK: - 渲染
 
-    // MARK: - 渲染
-
-    private func renderTick() {
+extension PiPManager {
+    func renderTick() {
         guard let layer else { return }
         if layer.status == .failed {
             EngineLog.shared.add("PiP layer 失败: \(String(describing: layer.error))")
             layer.flush()
         }
+
         let s = LiveStatsCenter.shared
+        let logLines = Array(EngineLog.shared.lines.suffix(11))
         let image = Self.drawDashboard(contextChars: s.contextChars, contextTokens: s.contextTokensEstimate,
                                        roundChars: s.roundChars, speed: s.charsPerSec,
-                                       usage: s.tokenUsage, generating: s.generating, roundCount: s.roundCount)
+                                       usage: s.tokenUsage, generating: s.generating,
+                                       roundCount: s.roundCount, logs: logLines)
         guard let pb = Self.pixelBuffer(from: image, width: W, height: H) else {
             EngineLog.shared.add("PiP pixelBuffer 创建失败")
             return
         }
 
-        // 格式描述直接从 pixel buffer 生成，天然匹配（比字面 fourcc 稳）
+        // 格式描述从 pixel buffer 生成，天然匹配（比字面 fourcc 稳）
         var fd: CMVideoFormatDescription?
         guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescriptionOut: &fd) == noErr,
               let fd else {
@@ -134,12 +135,16 @@ final class PiPManager: NSObject, ObservableObject {
 
         frameCount += 1
         if frameCount % 30 == 1 {
-            EngineLog.shared.add("[PiP] 帧 #\(frameCount) 已入队 layer.status=\(layer.status.rawValue)")
+            EngineLog.shared.add("[PiP] 帧 #\(frameCount) 已入队 status=\(layer.status.rawValue)")
         }
-        // PTS 置 invalid + DisplayImmediately，layer 立即渲染（不依赖 timebase 推进）
+
+        // ── 关键修复：PTS 用递增时间戳（每秒一帧，第 N 帧 PTS = N 秒）──
+        // 旧版用 CMTime.invalid + DisplayImmediately：在前台 inline 可见，
+        // 但进系统 PiP 悬浮窗后 DisplayImmediately 失效、invalid PTS 不推进 → 层永不渲染 → 全黑
+        let pts = CMTime(value: Int64(frameCount), timescale: 1)
         var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 1),
-                                        presentationTimeStamp: .invalid,
-                                        decodeTimeStamp: .invalid)
+                                        presentationTimeStamp: pts,
+                                        decodeTimeStamp: pts)
         var sb: CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb,
                                                        formatDescription: fd, sampleTiming: &timing,
@@ -148,14 +153,12 @@ final class PiPManager: NSObject, ObservableObject {
             EngineLog.shared.add("PiP sampleBuffer 创建失败")
             return
         }
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
-           CFArrayGetCount(attachments) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
         layer.enqueue(sb)
+
+        // 同步推进 timebase，让新 sample 立即过期、老 sample 不过期
+        if let tb = layer.controlTimebase {
+            CMTimebaseSetTime(tb, time: pts)
+        }
     }
 
     private static func pixelBuffer(from image: UIImage, width: Int, height: Int) -> CVPixelBuffer? {
@@ -173,18 +176,20 @@ final class PiPManager: NSObject, ObservableObject {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
         ctx.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        ctx.setFillColor(CGColor(red: 0.04, green: 0.07, blue: 0.13, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         if let cg = image.cgImage {
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
         return pb
     }
+}
+// MARK: - 面板绘制
 
-    /// 监控面板：960x540（PiP 窗口自动缩放）
+extension PiPManager {
+    /// 监控面板：960x540（PiP 窗口自动缩放）——顶部数据 + 底部实时日志
     private static func drawDashboard(contextChars: Int, contextTokens: Int,
                                       roundChars: Int, speed: Double,
-                                      usage: Int64, generating: Bool, roundCount: Int) -> UIImage {
+                                      usage: Int64, generating: Bool,
+                                      roundCount: Int, logs: [String]) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 960, height: 540))
         return renderer.image { ctx in
             let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
@@ -194,26 +199,44 @@ final class PiPManager: NSObject, ObservableObject {
             ctx.cgContext.drawLinearGradient(g, start: .zero,
                                              end: CGPoint(x: 0, y: 540), options: [])
 
-            // 标题
+            // 标题 + 时间
             let dot = generating ? "🟢" : "⚪️"
-            title("\(dot) 鲸聊 · 实时监控", x: 44, y: 34, size: 30, bold: true, color: .white)
+            title("\(dot) 鲸聊 · 实时监控", x: 44, y: 30, size: 28, bold: true, color: .white)
             let fmt = DateFormatter()
             fmt.dateFormat = "HH:mm:ss"
-            title(fmt.string(from: Date()), x: 800, y: 42, size: 20, bold: false, color: UIColor(white: 1, alpha: 0.45))
+            let timeStr = fmt.string(from: Date())
+            let tw = (timeStr as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 24)]).width
+            title(timeStr, x: 916 - tw, y: 38, size: 24, bold: false, color: UIColor(white: 1, alpha: 0.55))
 
-            // 上下文
+            // 三行统计
             row(label: "上下文", value: "\(grouped(contextChars)) 字",
                 sub: "≈ \(grouped(contextTokens)) tok",
-                y: 120, valueColor: .white)
-            // 本轮输出
+                y: 96, valueColor: .white)
             let sp = generating ? String(format: "%.1f 字/秒", speed) : "已结束"
             row(label: "本轮输出（第 \(roundCount + (generating ? 1 : 0)) 轮）",
                 value: "\(grouped(roundChars)) 字 · \(sp)",
-                sub: nil, y: 240, valueColor: UIColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 1))
-            // 累计消耗
+                sub: nil, y: 188, valueColor: UIColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 1))
             row(label: "累计消耗（服务端上报）",
                 value: "\(grouped(Int(usage))) tok",
-                sub: nil, y: 360, valueColor: UIColor(red: 1.00, green: 0.76, blue: 0.35, alpha: 1))
+                sub: nil, y: 280, valueColor: UIColor(red: 1.00, green: 0.76, blue: 0.35, alpha: 1))
+
+            // 日志分隔线
+            ctx.cgContext.setFillColor(UIColor(white: 1, alpha: 0.12).cgColor)
+            ctx.cgContext.fill(CGRect(x: 44, y: 372, width: 872, height: 1))
+            title("实时日志", x: 44, y: 382, size: 18, bold: true, color: UIColor(white: 1, alpha: 0.5))
+
+            // 实时日志（倒序显示最近 11 行）
+            var y: CGFloat = 408
+            for line in logs.reversed() {
+                let s = String(line.prefix(58))
+                let color: UIColor = line.contains("错误") || line.contains("失败")
+                    ? UIColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1)
+                    : line.contains("完成") || line.contains("已")
+                    ? UIColor(red: 0.55, green: 0.88, blue: 0.68, alpha: 1)
+                    : UIColor(white: 1, alpha: 0.72)
+                title(s, x: 44, y: y, size: 15, bold: false, color: color)
+                y += 16.5
+            }
         }
     }
 
@@ -227,7 +250,7 @@ final class PiPManager: NSObject, ObservableObject {
 
     private static func title(_ text: String, x: CGFloat, y: CGFloat, size: CGFloat, bold: Bool, color: UIColor) {
         let p = NSMutableParagraphStyle()
-        p.lineBreakMode = .byCharWrapping
+        p.lineBreakMode = .byTruncatingTail
         (text as NSString).draw(
             at: CGPoint(x: x, y: y),
             withAttributes: [
@@ -244,13 +267,9 @@ final class PiPManager: NSObject, ObservableObject {
             title(sub, x: 44 + w + 24, y: y + 48, size: 22, bold: false, color: UIColor(white: 1, alpha: 0.45))
         }
     }
-
-    // MARK: - 静音音频（保活兜底）
-
-    private func startSilentAudio() {
-        SilentAudio.shared.start()
-    }
 }
+
+// MARK: - PiP delegate
 
 extension PiPManager: AVPictureInPictureSampleBufferPlaybackDelegate, AVPictureInPictureControllerDelegate {
     func pictureInPictureController(_ pc: AVPictureInPictureController, setPlaying playing: Bool) {
