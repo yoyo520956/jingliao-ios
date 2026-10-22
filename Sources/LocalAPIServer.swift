@@ -933,7 +933,7 @@ final class LocalAPIServer: ObservableObject {
                             EngineLog.shared.add("[网关] 零正文重试 #\(round + 2) 成功")
                             break
                         }
-                        r = mergeResult(r, rN)
+                        r = Self.mergeResult(r, rN)
                         // 重试前若旧会话没删干净，这里补删
                         if sidN != activeSid { await engine.deleteSession(account: account, sessionID: sidN) }
                     }
