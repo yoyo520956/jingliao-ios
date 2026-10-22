@@ -816,6 +816,20 @@ final class LocalAPIServer: ObservableObject {
                 EngineLog.shared.add("[网关] 内置必发提示词已注入（\(bi.count) 字）")
             }
         }
+        // ── 人设安全阀：单条 system 超 2 万字必裁剪（头1.2万+尾8千，中部省略）──
+        // 实测人设 10 万字会让上游网页协议直接返回零正文 → 触发兜底裸消息 → 历史/工具全丢 = 失忆。
+        // 压到 2 万后整包 prompt 稳定 < 16 万，全量历史必达模型（记忆根治）
+        effective = effective.map { m in
+            guard (m["role"] as? String) == "system" else { return m }
+            let content = Self.msgText(m)
+            guard content.count > 20_000 else { return m }
+            var m2 = m
+            m2["content"] = String(content.prefix(12_000))
+                + "\n……[系统提示词 \(content.count) 字，中部省略 \(content.count - 20_000) 字以保证全量历史送达]……\n"
+                + String(content.suffix(8_000))
+            EngineLog.shared.add("[网关] 系统提示词 \(content.count) 字 → 裁剪 2 万字（保全量历史）")
+            return m2
+        }
         let fullSource = effective
         var fullPrompt = Self.assemblePrompt(fullSource)
         // 完整历史一次发全：6 万字符以内不做任何裁剪（上游客户端上限 16 万），
@@ -828,10 +842,15 @@ final class LocalAPIServer: ObservableObject {
         // ── 工具调用（网页版协议上的 function calling）──
         // 只注入调用指令；tool 结果消息已由 assemblePrompt/compactPrompt 按 [工具] 标签编进 prompt，不再重复拼
         let toolDefs = YaotaiTools.extractToolDefs(json)
+        let baseLen = fullPrompt.count   // 注入前的基础长度（系统 + 历史）
         if !toolDefs.isEmpty {
             fullPrompt += "\n\n" + YaotaiTools.buildInjection(json, funcs: toolDefs)
             EngineLog.shared.add("[网关] 工具调用启用：\(toolDefs.count) 个工具（历史 tool 结果已在 prompt 内，不重复拼）")
         }
+        // prompt 构成日志：系统（人设）/ 历史 / 工具 各占多少，一眼定位吃上下文的元凶
+        let sysChars = effective.compactMap { ($0["role"] as? String) == "system" ? Self.msgText($0) : nil }.reduce(0) { $0 + $1.count }
+        let injChars = fullPrompt.count - baseLen
+        EngineLog.shared.add("[网关] prompt 构成：系统 \(sysChars) + 历史 \(max(0, baseLen - sysChars)) + 工具 \(injChars) → 共 \(fullPrompt.count) 字")
 
         // ── 图片多模态：content parts 里的 image_url → 上传官方 → ref_file_ids ──
         var refFileIds: [String] = []
@@ -963,9 +982,12 @@ final class LocalAPIServer: ObservableObject {
                                 prompt: fullPrompt, thinking: false, search: false,
                                 refFileIds: refFileIds, onMeta: { box.msgID = $0 })
                         } else {
-                            // attempt3：裸用户消息（防系统人设触发上游内容过滤）
-                            let bare = lastUser.isEmpty ? fullPrompt : lastUser
-                            EngineLog.shared.add("[网关] 零正文重试 #3：裸用户消息（\(bare.count) 字）")
+                            // attempt3：裸用户消息（防系统人设触发上游内容过滤），但工具调用指令仍全部带上
+                            var bare = lastUser.isEmpty ? fullPrompt : lastUser
+                            if !toolDefs.isEmpty {
+                                bare += "\n\n" + YaotaiTools.buildInjection(json, funcs: toolDefs)
+                            }
+                            EngineLog.shared.add("[网关] 零正文重试 #3：用户消息\(lastUser.count) 字\(!toolDefs.isEmpty ? "+工具" : "")")
                             reqN = DSChatEngine.CompleteRequest(
                                 account: account, sessionID: sidN, parentMessageID: nil,
                                 prompt: bare, thinking: false, search: false,
@@ -1028,8 +1050,11 @@ final class LocalAPIServer: ObservableObject {
                                 prompt: fullPrompt, thinking: false, search: false,
                                 refFileIds: refFileIds, onMeta: { box.msgID = $0 })
                         } else {
-                            let bare = lastUser.isEmpty ? fullPrompt : lastUser
-                            EngineLog.shared.add("[网关] 零正文（非流式）重试 #3：裸用户消息（\(bare.count) 字）")
+                            var bare = lastUser.isEmpty ? fullPrompt : lastUser
+                            if !toolDefs.isEmpty {
+                                bare += "\n\n" + YaotaiTools.buildInjection(json, funcs: toolDefs)
+                            }
+                            EngineLog.shared.add("[网关] 零正文（非流式）重试 #3：用户消息\(lastUser.count) 字\(!toolDefs.isEmpty ? "+工具" : "")")
                             reqN = DSChatEngine.CompleteRequest(
                                 account: account, sessionID: sidN, parentMessageID: nil,
                                 prompt: bare, thinking: false, search: false,
