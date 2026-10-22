@@ -42,9 +42,11 @@ final class PiPManager: NSObject, ObservableObject {
         l.isOpaque = true
         l.backgroundColor = UIColor(red: 0.03, green: 0.04, blue: 0.08, alpha: 1).cgColor
         l.frame = CGRect(x: 0, y: 0, width: W, height: H)
-        let v = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        // 宿主必须有一定尺寸：1x1 会让系统 PiP 采不到有效画面 → 全黑
+        let v = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 16))
         v.backgroundColor = .black
-        v.alpha = 0.01
+        v.alpha = 0.02
+        v.clipsToBounds = false
         v.layer.addSublayer(l)
         if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
            let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
@@ -64,8 +66,9 @@ final class PiPManager: NSObject, ObservableObject {
 
         // 4. timebase 归位 + 推进（每帧都会推进，保证 sample 不过期）
         if let tb = l.controlTimebase {
+            // 基准必须是真实时钟，否则 setTime(.zero) 后样本永远“未到点” → 黑屏
+            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
             CMTimebaseSetRate(tb, rate: 1.0)
-            CMTimebaseSetTime(tb, time: .zero)
         }
 
         // 5. 每秒一帧监控面板
@@ -138,13 +141,11 @@ extension PiPManager {
             EngineLog.shared.add("[PiP] 帧 #\(frameCount) 已入队 status=\(layer.status.rawValue)")
         }
 
-        // ── 关键修复：PTS 用递增时间戳（每秒一帧，第 N 帧 PTS = N 秒）──
-        // 旧版用 CMTime.invalid + DisplayImmediately：在前台 inline 可见，
-        // 但进系统 PiP 悬浮窗后 DisplayImmediately 失效、invalid PTS 不推进 → 层永不渲染 → 全黑
-        let pts = CMTime(value: Int64(frameCount), timescale: 1)
+        // ── PTS 必须来自真实时钟：与 controlTimebase 同源，样本才会被渲染 ──
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
         var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 1),
-                                        presentationTimeStamp: pts,
-                                        decodeTimeStamp: pts)
+                                        presentationTimeStamp: now,
+                                        decodeTimeStamp: .invalid)
         var sb: CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb,
                                                        formatDescription: fd, sampleTiming: &timing,
@@ -153,12 +154,16 @@ extension PiPManager {
             EngineLog.shared.add("PiP sampleBuffer 创建失败")
             return
         }
-        layer.enqueue(sb)
-
-        // 同步推进 timebase，让新 sample 立即过期、老 sample 不过期
-        if let tb = layer.controlTimebase {
-            CMTimebaseSetTime(tb, time: pts)
+        // 首帧强制立刻显示（inline 预览需要），PiP 里靠 timebase 自然到期
+        if frameCount <= 1,
+           let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
+           CFArrayGetCount(atts) > 0 {
+            let d = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(d,
+                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         }
+        layer.enqueue(sb)
     }
 
     private static func pixelBuffer(from image: UIImage, width: Int, height: Int) -> CVPixelBuffer? {
