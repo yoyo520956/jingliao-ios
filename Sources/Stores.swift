@@ -99,6 +99,7 @@ struct Conversation: Codable, Identifiable, Equatable {
     var parentMessageID: Int64 = 0
     var createdAt: Double = Date().timeIntervalSince1970
     var updatedAt: Double = Date().timeIntervalSince1970
+    var pinned: Bool = false
 }
 
 final class ChatStore: ObservableObject {
