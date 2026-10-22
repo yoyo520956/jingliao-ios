@@ -6,7 +6,7 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: 2.3.2
+    MARKETING_VERSION: 2.3.3
     CURRENT_PROJECT_VERSION: "20261021.13"
     SWIFT_VERSION: "5.9"
     ENABLE_DEBUG_DYLIB: "NO"
