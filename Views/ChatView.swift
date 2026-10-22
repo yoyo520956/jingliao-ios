@@ -196,6 +196,16 @@ struct ChatView: View {
 struct Bubble: View {
     let m: ChatMessage
     @State private var showThink = false
+    @State private var expanded = false
+
+    private var isLong: Bool { m.content.count > 500 }
+
+    private var displayText: String {
+        if isLong && !expanded {
+            return String(m.content.prefix(500)) + "…"
+        }
+        return m.content
+    }
 
     var body: some View {
         HStack(alignment: .top) {
@@ -243,8 +253,26 @@ struct Bubble: View {
                         .padding(10)
                         .background(RoundedRectangle(cornerRadius: WX.rowCorner).fill(WX.faintInk))
                 } else {
-                    MarkdownText(text: m.content.isEmpty ? "…" : m.content)
-                        .padding(4)
+                    VStack(alignment: .leading, spacing: 4) {
+                        MarkdownText(text: displayText.isEmpty ? "…" : displayText)
+                            .padding(4)
+                        if isLong {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 10))
+                                    Text(expanded ? "收起" : "展开全文（\(m.content.count) 字）")
+                                        .font(.caption)
+                                }
+                                .foregroundColor(WX.secondary)
+                                .padding(.top, 2)
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.leading, 4)
+                        }
+                    }
                 }
             }
             if m.role != "user" { Spacer(minLength: 52) }
