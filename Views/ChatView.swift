@@ -301,3 +301,5 @@ struct Bubble: View {
             if m.role != "user" { Spacer(minLength: 52) }
         }
 
+    }
+}
