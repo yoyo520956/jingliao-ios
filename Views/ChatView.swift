@@ -315,21 +315,10 @@ struct Bubble: View {
 }
 
 // MARK: - 消息朗读控制器（AVSpeech 中文女声）
-final class TTSController: NSObject {
+final class TTSController {
     static let shared = TTSController()
     private let synth = AVSpeechSynthesizer()
     private(set) var isSpeaking = false
-
-    @objc func notifyDidStop(_ n: Notification) { isSpeaking = false }
-    @objc func notifyDidCancel(_ n: Notification) { isSpeaking = false }
-
-    override init() {
-        super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(notifyDidStop),
-            name: AVSpeechSynthesizer.didFinishSpeakingNotification, object: synth)
-        NotificationCenter.default.addObserver(self, selector: #selector(notifyDidCancel),
-            name: AVSpeechSynthesizer.didCancelUtteranceNotification, object: synth)
-    }
 
     func speak(_ text: String) {
         if text.isEmpty { return }
@@ -339,6 +328,12 @@ final class TTSController: NSObject {
         u.rate = 0.5
         u.pitchMultiplier = 1.0
         u.volume = 1.0
+        u.pre utteranceDidFinish = { [weak self] _ in
+            DispatchQueue.main.async { self?.isSpeaking = false }
+        }
+        u.pre utteranceWillCancel = { [weak self] _ in
+            DispatchQueue.main.async { self?.isSpeaking = false }
+        }
         isSpeaking = true
         synth.speak(u)
     }
