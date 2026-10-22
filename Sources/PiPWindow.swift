@@ -15,6 +15,7 @@ final class PiPManager: NSObject, ObservableObject {
     private var controller: AVPictureInPictureController?
     private var hostView: UIView?
     private var timer: Timer?
+    private var frameCount = 0
 
     private let W = 960
     private let H = 540
@@ -35,19 +36,25 @@ final class PiPManager: NSObject, ObservableObject {
         }
         startSilentAudio()
 
-        // 2. 渲染层 + 1x1 宿主视图挂到 keyWindow
+        // 2. 渲染层 + 宿主视图挂到 keyWindow
+        // 注意：宿主视图必须 isHidden=false（iOS 15+ 对完全隐藏的宿主层会黑屏）；
+        // 用 1x1 + alpha 0.01 的「可见但不可见」微窗贴在屏幕左下角，用户无感但层是活的
         let l = AVSampleBufferDisplayLayer()
         l.videoGravity = .resizeAspect
         l.frame = CGRect(x: 0, y: 0, width: W, height: H)
         l.backgroundColor = UIColor(red: 0.04, green: 0.07, blue: 0.13, alpha: 1).cgColor
-        let v = UIView(frame: CGRect(x: -8, y: -8, width: 2, height: 2))
-        v.isHidden = true
+        let v = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        v.backgroundColor = .black
+        v.alpha = 0.01
+        v.clipsToBounds = true
         v.layer.addSublayer(l)
         if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
            let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
+            v.center = CGPoint(x: win.bounds.midX, y: win.bounds.height - 40)
             win.addSubview(v)
         }
         hostView = v
+        frameCount = 0
 
         // 3. PiP 控制器
         let cs = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: l, playbackDelegate: self)
@@ -125,6 +132,10 @@ final class PiPManager: NSObject, ObservableObject {
             return
         }
 
+        frameCount += 1
+        if frameCount % 30 == 1 {
+            EngineLog.shared.add("[PiP] 帧 #\(frameCount) 已入队 layer.status=\(layer.status.rawValue)")
+        }
         // PTS 置 invalid + DisplayImmediately，layer 立即渲染（不依赖 timebase 推进）
         var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 1),
                                         presentationTimeStamp: .invalid,
