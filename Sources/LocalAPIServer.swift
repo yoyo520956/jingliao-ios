@@ -156,11 +156,15 @@ final class LocalAPIServer: ObservableObject {
     /// 超长 prompt 智能裁剪（首轮兜底）：系统人设头尾保留 + 首条用户消息 + 工具链全保留 + 最近对话
     /// 历史教训：早期版本只留"最近4条"，把中间的 assistant「调用指令」裁掉只剩 [工具] 结果，
     /// 模型看到结果却不知道谁调的 → 每轮再调一遍同样工具 → 死循环 14 次 → 上限流 → 上游返回空
+    /// 超长 prompt 智能裁剪：人设压缩 + 首轮完整 + 按轮次从最早往丢弃，最近对话全部保留
+    /// 目标：prompt ≤ 163_840 字（上游网页协议 input_character_limit_for 上限）
+    /// 历史教训：早期版本只留"最近4条"，中间 assistant「调用指令」被裁掉只剩 [工具] 结果，
+    /// 模型看到结果不知谁调的 → 每轮重复调同一工具 → 死循环。所以按「轮次」整体丢弃，
+    /// 绝不拆散 assistant↔tool 配对，也不丢最近的任何一轮（这是记忆的命根）
     static func compactPrompt(_ messages: [[String: Any]]) -> String {
         func tagLine(_ m: [String: Any]) -> String {
             let role = m["role"] as? String ?? "user"
             if role == "assistant" {
-                // assistant 带 tool_calls 的：必须显示调了哪些工具，否则调用链断裂
                 if let tcs = m["tool_calls"] as? [[String: Any]], !tcs.isEmpty {
                     let names = tcs.compactMap { tc -> String? in
                         guard let f = tc["function"] as? [String: Any],
@@ -177,45 +181,57 @@ final class LocalAPIServer: ObservableObject {
             let tag = role == "system" ? "系统" : (role == "tool" ? "工具" : "用户")
             return "[\(tag)] \(msgText(m))"
         }
-        // 参数摘要：content 里 JSON 的 arguments 太长，截断到 120 字
         func argBrief(_ s: String) -> String {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.count > 120 ? String(t.prefix(120)) + "…" : t
         }
+
+        let limit = 163_840
         let sysIdx = messages.firstIndex { ($0["role"] as? String) == "system" }
         let sysText = sysIdx.map { msgText(messages[$0]) } ?? ""
-        var out: [String] = []
-        if !sysText.isEmpty {
-            let capped = sysText.count > 60_000
-                ? String(sysText.prefix(30_000)) + "\n……[系统人设过长，中部省略 \(sysText.count - 60_000) 字]……\n" + String(sysText.suffix(30_000))
-                : sysText
-            out.append("[系统] \(capped)")
+        // 人设先压缩到 2 万字：人设占地方最大，压掉后 prompt 大概率不超限、历史完全不用裁
+        let capped = sysText.count > 20_000
+            ? String(sysText.prefix(12_000)) + "\n……[系统人设过长，中部省略 \(sysText.count - 20_000) 字]……\n" + String(sysText.suffix(8_000))
+            : sysText
+        var out: [String] = ["[系统] \(capped)"]
+
+        // 轮次切分：每个 user 消息起头是一段完整轮次（含其后所有 assistant / tool）
+        let starts = messages.enumerated().compactMap { (off, m) -> Int? in
+            guard (m["role"] as? String) ?? "" == "user" else { return nil }
+            return off
         }
-        let firstUserIdx = messages.firstIndex { ($0["role"] as? String) == "user" }
-        if let i = firstUserIdx {
-            out.append("[用户] \(String(msgText(messages[i]).prefix(1000)))")
+        guard !starts.isEmpty else { return out.joined(separator: "\n\n") }
+
+        // 首轮完整保留
+        let first = starts[0]
+        let firstEnd = starts.count > 1 ? starts[1] : messages.count
+        let roundChars = starts.enumerated().map { (off, st) -> Int in
+            let en = off + 1 < starts.count ? starts[off + 1] : messages.count
+            return messages[st..<en].map { tagLine($0) }.joined(separator: "\n\n").count
         }
+
+        // 从最后一轮往前累加，装不下的停 —— 最近的轮次优先级最高
+        let budget = limit - capped.count - 500
+        var used = roundChars[0]
+        var keepFrom = starts.count - 1
+        var idx = starts.count - 1
+        while idx >= 1 {
+            let c = roundChars[idx]
+            if used + c > budget { break }
+            used += c
+            keepFrom = idx
+            idx -= 1
+        }
+
         var seen = Set<Int>()
-        if let i = sysIdx { seen.insert(i) }
-        if let i = firstUserIdx { seen.insert(i) }
-        // 工具轮：完整保留调用链（首个用户消息之后的全部 assistant/tool），防止上下文断裂导致重复调用
-        let hasTools = messages.contains { ($0["role"] as? String) ?? "" == "tool" }
-        if hasTools {
-            for (idx, m) in messages.enumerated() {
-                guard idx > (firstUserIdx ?? 0), !seen.contains(idx) else { continue }
-                let r = m["role"] as? String ?? ""
-                if r == "tool" || r == "assistant" {
-                    out.append(tagLine(m))
-                    seen.insert(idx)
-                }
-            }
+        for i in first..<firstEnd { out.append(tagLine(messages[i])); seen.insert(i) }
+
+        if keepFrom > 1 {
+            out.append("[系统] ……[已省略最早 \(keepFrom - 1) 轮历史（prompt 超 \(limit) 字上限）；从第 \(keepFrom + 1) 轮起完整保留]……")
         }
-        // 其余情况：保留最近 4 条
-        let tail = messages.suffix(4)
-        for (off, m) in tail.enumerated() {
-            let real = messages.count - tail.count + off
-            if seen.contains(real) { continue }
-            out.append(tagLine(m))
+        let keepStart = keepFrom > 0 ? starts[keepFrom] : firstEnd
+        for i in keepStart..<messages.count where !seen.contains(i) {
+            out.append(tagLine(messages[i]))
         }
         return out.joined(separator: "\n\n")
     }
@@ -488,12 +504,34 @@ final class LocalAPIServer: ObservableObject {
                 ])
                 return
             }
+            // /v1/usage：客户端查用量/余额（Minis 会打这个）
+            if path == "/v1/usage" {
+                let t = UsageStore.shared.todayTotal
+                self.sendJSON(conn, [
+                    "object": "usage",
+                    "balance": -1,
+                    "today": ["prompt": t.prompt, "completion": t.completion,
+                              "count": t.count, "total": t.prompt + t.completion],
+                    "total": UsageStore.shared.grandTotal,
+                    "prompt": t.prompt,
+                    "completion": t.completion,
+                    "count": t.count,
+                    "prompt_tokens": t.prompt,
+                    "completion_tokens": t.completion,
+                    "total_tokens": t.prompt + t.completion,
+                ])
+                conn.cancel()
+                return
+            }
             if path == "/v1/models" {
+                let now = Int(Date().timeIntervalSince1970)
                 self.sendJSON(conn, [
                     "object": "list",
                     "data": [
-                        ["id": "deepseek-chat", "object": "model", "owned_by": "deepseek"],
-                        ["id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek"],
+                        ["id": "deepseek-chat", "object": "model", "created": now,
+                         "owned_by": "deepseek", "root": "deepseek-chat", "permission": [], "deleted": false],
+                        ["id": "deepseek-reasoner", "object": "model", "created": now,
+                         "owned_by": "deepseek", "root": "deepseek-reasoner", "permission": [], "deleted": false],
                     ],
                 ])
                 conn.cancel()
@@ -603,7 +641,13 @@ final class LocalAPIServer: ObservableObject {
             }
             EngineLog.shared.add("[网关] 工具调用：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
         }
-        _ = sid
+                _ = sid
+        // usage 兜底：上游网页协议不上报 token 用量时按字符估算（中文≈0.6 tok/字）
+        if (box?.usage ?? 0) <= 0, !visibleText.isEmpty {
+            let est = max(1, Int(Double(visibleText.count) * 0.6))
+            box?.usage = Double(est)
+            EngineLog.shared.add("[网关] usage 未上报，按 \(est) tok 估算（\(visibleText.count) 字）")
+        }
         // 诊断：零正文时把模型实际收到的内容 dump 出来——工具轮上下文在 prompt 尾部，只看前 200 字（人设）永远看不出问题
         if !gotContent && !gotErr {
             let tail = String(req.prompt.suffix(400)).replacingOccurrences(of: "\n", with: "⏎")
@@ -777,7 +821,7 @@ final class LocalAPIServer: ObservableObject {
         // 完整历史一次发全：6 万字符以内不做任何裁剪（上游客户端上限 16 万），
         // 只有极端超长才走智能裁剪（保留工具链完整）——Minis 每轮带全量 messages，这是记忆的根本保障
         if fullPrompt.count > 163_840 {
-            EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 6 万 → 智能裁剪（人设头尾+首轮+工具链全保留）")
+            EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 16 万上限 → 裁剪（人设压缩+首轮+按轮次丢最早，最近全保留）")
             fullPrompt = Self.compactPrompt(fullSource)
         }
 
@@ -1015,6 +1059,9 @@ final class LocalAPIServer: ObservableObject {
                     EngineLog.shared.add("[网关] 工具调用（非流式）：\(parsed.calls.map { $0.name }.joined(separator: ", "))")
                 }
                 let finishReason = toolCallsJSON.isEmpty ? "stop" : "tool_calls"
+                // usage 兜底：上游网页协议不上报 token 用量时按字符估算（中文≈0.6 tok/字），避免客户端显示 0
+                let pt = max(1, Int(Double(fullPrompt.count) * 0.6))
+                let ct = Int(box.usage) > 0 ? Int(box.usage) : max(1, Int(Double(text.count) * 0.6))
                 var message: [String: Any] = ["role": "assistant", "content": text, "reasoning_content": res.think]
                 if !toolCallsJSON.isEmpty { message["tool_calls"] = toolCallsJSON }
                 let obj: [String: Any] = [
@@ -1026,9 +1073,9 @@ final class LocalAPIServer: ObservableObject {
                         "finish_reason": finishReason,
                     ]],
                     "usage": [
-                        "prompt_tokens": max(1, fullPrompt.count / 2),
-                        "completion_tokens": Int(box.usage),
-                        "total_tokens": max(1, fullPrompt.count / 2) + Int(box.usage),
+                        "prompt_tokens": pt,
+                        "completion_tokens": ct,
+                        "total_tokens": pt + ct,
                     ],
                 ]
                 // Anthropic 协议：响应转成 Messages 格式后只发一份
