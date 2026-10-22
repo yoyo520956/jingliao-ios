@@ -10,7 +10,10 @@ struct ConversationsView: View {
 
     /// 跨所有会话的所有消息做全文搜索
     private var sorted: [Conversation] {
-        let arr = chats.conversations.sorted { $0.updatedAt > $1.updatedAt }
+        let arr = chats.conversations.sorted { a, b in
+            if a.pinned != b.pinned { return a.pinned }
+            return a.updatedAt > b.updatedAt
+        }
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return arr }
         // 标题命中 或 任意消息命中
@@ -59,10 +62,17 @@ struct ConversationsView: View {
                                     .stroke(WX.separator, lineWidth: 0.5)
                             )
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(c.title)
-                                    .font(WX.MBF.serif(17))
-                                    .foregroundColor(WX.titleBlack)
-                                    .lineLimit(1)
+                                HStack(spacing: 2) {
+                                    if c.pinned {
+                                        Image(systemName: "pin")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(WX.green)
+                                    }
+                                    Text(c.title)
+                                        .font(WX.MBF.serif(17))
+                                        .foregroundColor(WX.titleBlack)
+                                        .lineLimit(1)
+                                }
                                 Text(c.messages.last?.content ?? "…")
                                     .font(.system(size: 14))
                                     .foregroundColor(WX.secondary)
@@ -90,6 +100,16 @@ struct ConversationsView: View {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
+                        Button {
+                            if let idx = chats.conversations.firstIndex(where: { $0.id == c.id }) {
+                                chats.conversations[idx].pinned.toggle()
+                                chats.upsert(chats.conversations[idx])
+                            }
+                        } label: {
+                            Label(c.pinned ? "取消置顶" : "置顶",
+                                  systemImage: c.pinned ? "pin.slash" : "pin")
+                        }
+                        Divider()
                         Button {
                             if let url = ChatExport.tempFile(c) {
                                 shareItems = [url]
