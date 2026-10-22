@@ -204,7 +204,7 @@ final class DSChatEngine {
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         headers["Content-Type"] = "multipart/form-data; boundary=\(boundary)"
         let upURL = URL(string: DSConfig.apiBase + "/file/upload_file")!
-        let upReq = DSIdentity.request(upURL, method: "POST", headers: headers, timeout: 120)
+        let upReq = DSIdentity.request(upURL, method: "POST", headers: headers, timeout: 600)
         // DSIdentity.request 带 jsonBody 才设 body，这里手动挂
         var req = upReq
         req.httpBody = body
@@ -328,7 +328,7 @@ final class DSChatEngine {
         if let p = r.parentMessageID { body["parent_message_id"] = p }
 
         let url = URL(string: DSConfig.apiBase + "/chat/completion")!
-        let req = DSIdentity.request(url, method: "POST", headers: headers, jsonBody: body, timeout: 300)
+        let req = DSIdentity.request(url, method: "POST", headers: headers, jsonBody: body, timeout: 900)
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         EngineLog.shared.add("completion HTTP \(status)")
@@ -336,7 +336,7 @@ final class DSChatEngine {
             var t = ""
             for try await line in bytes.lines {
                 t += line
-                if t.count > 400 { break }
+                if t.count > 65536 { break }
             }
             throw DSError(message: "completion HTTP \(status): \(t)")
         }
