@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import AVSpeech
 
 /// 聊天页——微信 8.0.79 风格：灰底白/我的绿气泡、底部语音/表情/加号输入栏
 struct ChatView: View {
@@ -92,6 +93,15 @@ struct ChatView: View {
                                     }
                                     ShareLink(item: m.content) {
                                         Label("分享", systemImage: "square.and.arrow.up")
+                                    }
+                                    Button {
+                                        if TTSController.shared.isSpeaking {
+                                            TTSController.shared.stop()
+                                        } else {
+                                            TTSController.shared.speak(m.content)
+                                        }
+                                    } label: {
+                                        Label("朗读", systemImage: "speaker.wave.2")
                                     }
                                     Divider()
                                 }
@@ -301,5 +311,40 @@ struct Bubble: View {
             if m.role != "user" { Spacer(minLength: 52) }
         }
 
+    }
+}
+
+// MARK: - 消息朗读控制器（AVSpeech 中文女声）
+final class TTSController: NSObject {
+    static let shared = TTSController()
+    private let synth = AVSpeechSynthesizer()
+    private(set) var isSpeaking = false
+
+    @objc func notifyDidStop(_ n: Notification) { isSpeaking = false }
+    @objc func notifyDidCancel(_ n: Notification) { isSpeaking = false }
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(notifyDidStop),
+            name: AVSpeechSynthesizer.didFinishSpeakingNotification, object: synth)
+        NotificationCenter.default.addObserver(self, selector: #selector(notifyDidCancel),
+            name: AVSpeechSynthesizer.didCancelUtteranceNotification, object: synth)
+    }
+
+    func speak(_ text: String) {
+        if text.isEmpty { return }
+        if isSpeaking { synth.stopSpeaking(at: .immediate); isSpeaking = false }
+        let u = AVSpeechUtterance(string: text)
+        u.voice = AVSpeechSynthesisVoice(language: "zh-CN") ?? AVSpeechSynthesisVoice(language: "zh")
+        u.rate = 0.5
+        u.pitchMultiplier = 1.0
+        u.volume = 1.0
+        isSpeaking = true
+        synth.speak(u)
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+        isSpeaking = false
     }
 }
