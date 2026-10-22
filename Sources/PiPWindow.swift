@@ -64,9 +64,9 @@ final class PiPManager: NSObject, ObservableObject {
         controller = c
         layer = l
 
-        // 4. timebase 归位 + 推进（每帧都会推进，保证 sample 不过期）
+        // 4. timebase 归位（宿主时钟 + rate=1，自行推进）
         if let tb = l.controlTimebase {
-            // 基准必须是真实时钟，否则 setTime(.zero) 后样本永远“未到点” → 黑屏
+            // 基准挂宿主时钟且 rate=1：timebase 自己会走，样本到期即渲染
             CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
             CMTimebaseSetRate(tb, rate: 1.0)
         }
