@@ -83,6 +83,29 @@ struct ChatView: View {
                     }
                     ForEach(conv.messages) { m in
                         Bubble(m: m).id(m.id)
+                            .contextMenu {
+                                if !m.content.isEmpty {
+                                    Button {
+                                        UIPasteboard.general.string = m.content
+                                    } label: {
+                                        Label("复制内容", systemImage: "doc.on.doc")
+                                    }
+                                    ShareLink(item: m.content) {
+                                        Label("分享", systemImage: "square.and.arrow.up")
+                                    }
+                                    Divider()
+                                }
+                                Button(role: .destructive) {
+                                    if let idx = chats.conversations.firstIndex(where: { $0.id == conv.id }) {
+                                        if let midx = chats.conversations[idx].messages.firstIndex(where: { $0.id == m.id }) {
+                                            chats.conversations[idx].messages.remove(at: midx)
+                                            chats.upsert(chats.conversations[idx])
+                                        }
+                                    }
+                                } label: {
+                                    Label("删除消息", systemImage: "trash")
+                                }
+                            }
                     }
                 }
                 .padding(12)
@@ -277,5 +300,4 @@ struct Bubble: View {
             }
             if m.role != "user" { Spacer(minLength: 52) }
         }
-    }
-}
+
