@@ -175,10 +175,7 @@ final class PiPManager: NSObject, ObservableObject {
                 AVVideoExpectedSourceFrameRateKey: 2,
             ],
         ]
-        guard let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings) else {
-            EngineLog.shared.add("PiP 视频输入创建失败")
-            return nil
-        }
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vIn.expectsMediaDataInRealTime = false
 
         let audioSettings: [String: Any] = [
@@ -187,10 +184,7 @@ final class PiPManager: NSObject, ObservableObject {
             AVNumberOfChannelsKey: 1,
             AVEncoderBitRateKey: 32_000,
         ]
-        guard let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings) else {
-            EngineLog.shared.add("PiP 音频输入创建失败")
-            return nil
-        }
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         aIn.expectsMediaDataInRealTime = false
 
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
