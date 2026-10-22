@@ -645,7 +645,7 @@ final class LocalAPIServer: ObservableObject {
         // usage 兜底：上游网页协议不上报 token 用量时按字符估算（中文≈0.6 tok/字）
         if (box?.usage ?? 0) <= 0, !visibleText.isEmpty {
             let est = max(1, Int(Double(visibleText.count) * 0.6))
-            box?.usage = Double(est)
+            box?.usage = Int64(est)
             EngineLog.shared.add("[网关] usage 未上报，按 \(est) tok 估算（\(visibleText.count) 字）")
         }
         // 诊断：零正文时把模型实际收到的内容 dump 出来——工具轮上下文在 prompt 尾部，只看前 200 字（人设）永远看不出问题
