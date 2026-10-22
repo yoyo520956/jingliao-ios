@@ -128,6 +128,12 @@ final class LocalAPIServer: ObservableObject {
         return out
     }
 
+    /// 重试结果合并：任一尝试拿到正文/报错即视为有效信号
+    static func mergeResult(_ a: (content: Bool, err: Bool), _ b: (content: Bool, err: Bool))
+        -> (content: Bool, err: Bool) {
+        (a.content || b.content, a.err || b.err)
+    }
+
     /// 按 [系统]/[用户]/[助手]/[工具] 标签拼完整 prompt
     static func assemblePrompt(_ messages: [[String: Any]], keep: Int? = nil) -> String {
         let list: [[String: Any]]
@@ -180,8 +186,8 @@ final class LocalAPIServer: ObservableObject {
         let sysText = sysIdx.map { msgText(messages[$0]) } ?? ""
         var out: [String] = []
         if !sysText.isEmpty {
-            let capped = sysText.count > 8000
-                ? String(sysText.prefix(4000)) + "\n……[系统人设过长，中部省略 \(sysText.count - 8000) 字]……\n" + String(sysText.suffix(4000))
+            let capped = sysText.count > 60_000
+                ? String(sysText.prefix(30_000)) + "\n……[系统人设过长，中部省略 \(sysText.count - 60_000) 字]……\n" + String(sysText.suffix(30_000))
                 : sysText
             out.append("[系统] \(capped)")
         }
@@ -270,7 +276,7 @@ final class LocalAPIServer: ObservableObject {
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = data
-                req.timeoutInterval = 180
+                req.timeoutInterval = 900
                 let t0 = Date()
                 do {
                     let (d, resp) = try await URLSession.shared.data(for: req)
@@ -308,7 +314,7 @@ final class LocalAPIServer: ObservableObject {
             if let data { ctx.buf.append(contentsOf: [UInt8](data)) }
             if !ctx.headDone {
                 guard let idx = Self.findDoubleCRLF(ctx.buf) else {
-                    if ctx.buf.count > 262_144 { conn.cancel() } else if !isComplete { self.recv(conn, ctx) } else { conn.cancel() }
+                    if ctx.buf.count > 16_777_216 { conn.cancel() } else if !isComplete { self.recv(conn, ctx) } else { conn.cancel() }
                     return
                 }
                 let head = String(decoding: ctx.buf[0..<idx], as: UTF8.self)
@@ -657,14 +663,14 @@ final class LocalAPIServer: ObservableObject {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.httpBody = (try? JSONSerialization.data(withJSONObject: out)) ?? body
-        req.timeoutInterval = 300
+        req.timeoutInterval = 900
 
         do {
             let (bytes, resp) = try await URLSession.shared.bytes(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             guard (200..<300).contains(code) else {
                 var t = ""
-                for try await line in bytes.lines { t += line; if t.count > 300 { break } }
+                for try await line in bytes.lines { t += line; if t.count > 65536 { break } }
                 sendErr(conn, status: "502 Bad Gateway", msg: "官方 API HTTP \(code): \(t)")
                 conn.cancel()
                 return
@@ -768,8 +774,10 @@ final class LocalAPIServer: ObservableObject {
         }
         let fullSource = effective
         var fullPrompt = Self.assemblePrompt(fullSource)
-        if fullPrompt.count > 20_000 {
-            EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 2 万 → 智能裁剪（人设头尾+首轮+最近 4 条）")
+        // 完整历史一次发全：6 万字符以内不做任何裁剪（上游客户端上限 16 万），
+        // 只有极端超长才走智能裁剪（保留工具链完整）——Minis 每轮带全量 messages，这是记忆的根本保障
+        if fullPrompt.count > 163_840 {
+            EngineLog.shared.add("[网关] prompt \(fullPrompt.count) 字超 6 万 → 智能裁剪（人设头尾+首轮+工具链全保留）")
             fullPrompt = Self.compactPrompt(fullSource)
         }
 
@@ -796,7 +804,7 @@ final class LocalAPIServer: ObservableObject {
                         mime = src.contains("image/png") ? "image/png" : (src.contains("image/webp") ? "image/webp" : "image/jpeg")
                     } else if src.hasPrefix("http") {
                         guard let u = URL(string: src) else { continue }
-                        var r2 = URLRequest(url: u); r2.timeoutInterval = 30
+                        var r2 = URLRequest(url: u); r2.timeoutInterval = 120
                         let (d, _) = try await URLSession.shared.data(for: r2)
                         data = d
                         mime = "image/jpeg"
@@ -893,42 +901,42 @@ final class LocalAPIServer: ObservableObject {
                 var r = await pumpStream(conn, account, sessionID, req, cid, model, box)
                 var activeSid = sessionID
 
-                // 兜底 1：链式轮失败/零正文 → 新会话 + 完整 prompt（上游会话过期就靠这层救）
-                if chained && (!r.content || r.err) {
-                    EngineLog.shared.add("[网关] 链式轮失败/空 → 新会话完整 prompt 重试")
-                    if let sid2 = try? await engine.createSession(account: account) {
-                        if sessionID != sid2 { await engine.deleteSession(account: account, sessionID: sessionID) }
-                        activeSid = sid2
-                        let req2 = DSChatEngine.CompleteRequest(
-                            account: account, sessionID: sid2, parentMessageID: nil,
-                            prompt: fullPrompt, thinking: thinking, search: search,
-                            onMeta: { box.msgID = $0 })
-                        r = await pumpStream(conn, account, sid2, req2, cid, model, box)
-                    }
-                }
-
-                // 兜底 2：仍零正文且无错 → 新会话 + 裸用户消息（防人设 prompt 触发上游过滤）
-                if !r.content && !r.err {
-                    if !lastUser.isEmpty && lastUser != fullPrompt {
-                        EngineLog.shared.add("[网关] 零正文 → 裸用户消息重试（规避人设触发过滤）")
-                        if let sid3 = try? await engine.createSession(account: account) {
-                            let req3 = DSChatEngine.CompleteRequest(
-                                account: account, sessionID: sid3, parentMessageID: nil,
-                                prompt: lastUser, thinking: thinking, search: search, onMeta: nil)
-                            let r3 = await pumpStream(conn, account, sid3, req3, cid, model)
-                            if r3.content {
-                                r = (true, false)
-                                await engine.deleteSession(account: account, sessionID: sid3)
-                            } else {
-                                await engine.deleteSession(account: account, sessionID: sid3)
-                            }
+                // ── 零正文重试链（上游风控/限流偶发返回空，Minis 侧就显示「上游未返回任何内容」）──
+                // attempt1 已发（全量 prompt）。若零正文/出错：退避 → attempt2 关深思/联网重发 → 退避 → attempt3 裸用户消息
+                let backoffs: [UInt64] = [800_000_000, 1_600_000_000]
+                if !r.content || r.err {
+                    for round in 0..<2 {
+                        try? await Task.sleep(nanoseconds: backoffs[round])
+                        guard let sidN = try? await engine.createSession(account: account) else { continue }
+                        if activeSid != sidN { await engine.deleteSession(account: account, sessionID: activeSid) }
+                        activeSid = sidN
+                        let reqN: DSChatEngine.CompleteRequest
+                        if round == 0 {
+                            // attempt2：完整 prompt 但关掉深思/联网（thinking/Search 模式上游偶发空回复）
+                            EngineLog.shared.add("[网关] 零正文重试 #2：完整 prompt 关深思/联网")
+                            reqN = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sidN, parentMessageID: nil,
+                                prompt: fullPrompt, thinking: false, search: false,
+                                refFileIds: refFileIds, onMeta: { box.msgID = $0 })
+                        } else {
+                            // attempt3：裸用户消息（防系统人设触发上游内容过滤）
+                            let bare = lastUser.isEmpty ? fullPrompt : lastUser
+                            EngineLog.shared.add("[网关] 零正文重试 #3：裸用户消息（\(bare.count) 字）")
+                            reqN = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sidN, parentMessageID: nil,
+                                prompt: bare, thinking: false, search: false,
+                                onMeta: { box.msgID = $0 })
                         }
+                        let rN = await pumpStream(conn, account, sidN, reqN, cid, model, box)
+                        if rN.content {
+                            r = (true, false)
+                            EngineLog.shared.add("[网关] 零正文重试 #\(round + 2) 成功")
+                            break
+                        }
+                        r = mergeResult(r, rN)
+                        // 重试前若旧会话没删干净，这里补删
+                        if sidN != activeSid { await engine.deleteSession(account: account, sessionID: sidN) }
                     }
-                }
-
-                // 兜底 3：还是空的 → 给客户端一段可见错误文本（否则 Minis 判 empty response）
-                if !r.content && !r.err {
-                    sendRaw(conn, "data: " + chunkJSON(cid, model, ["content": "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"], nil) + "\n\n")
                 }
                 EngineLog.shared.add("[网关] 完成 stream=1 content=\(r.content ? "有" : "无") err=\(r.err ? "有" : "无") tokens=\(box.usage)")
                 if r.content { saveChain(activeSid) }
@@ -960,24 +968,41 @@ final class LocalAPIServer: ObservableObject {
                         res = await pumpCollect(account, req2, box)
                     }
                 }
-                // 兜底 2：仍空且无错 → 裸用户消息
-                if res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, res.err.isEmpty {
-                    if !lastUser.isEmpty && lastUser != fullPrompt {
-                        EngineLog.shared.add("[网关] 零正文（非流式）→ 裸用户消息重试")
-                        if let sid3 = try? await engine.createSession(account: account) {
-                            let req3 = DSChatEngine.CompleteRequest(
-                                account: account, sessionID: sid3, parentMessageID: nil,
-                                prompt: lastUser, thinking: thinking, search: search, onMeta: nil)
-                            let r3 = await pumpCollect(account, req3)
-                            if !r3.content.isEmpty { res = r3 }
-                            await engine.deleteSession(account: account, sessionID: sid3)
+                // 兜底 2：仍空且无错 → 关深思/联网完整重发 → 裸用户消息（退避重试，治上游偶发空回复）
+                var attempt = 2
+                let backoffsNonStream: [UInt64] = [800_000_000, 1_600_000_000]
+                while res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, res.err.isEmpty, attempt <= 3 {
+                    try? await Task.sleep(nanoseconds: backoffsNonStream[attempt - 2])
+                    if let sidN = try? await engine.createSession(account: account) {
+                        if activeSid != sidN { await engine.deleteSession(account: account, sessionID: activeSid) }
+                        activeSid = sidN
+                        let reqN: DSChatEngine.CompleteRequest
+                        if attempt == 2 {
+                            EngineLog.shared.add("[网关] 零正文（非流式）重试 #2：完整 prompt 关深思/联网")
+                            reqN = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sidN, parentMessageID: nil,
+                                prompt: fullPrompt, thinking: false, search: false,
+                                refFileIds: refFileIds, onMeta: { box.msgID = $0 })
+                        } else {
+                            let bare = lastUser.isEmpty ? fullPrompt : lastUser
+                            EngineLog.shared.add("[网关] 零正文（非流式）重试 #3：裸用户消息（\(bare.count) 字）")
+                            reqN = DSChatEngine.CompleteRequest(
+                                account: account, sessionID: sidN, parentMessageID: nil,
+                                prompt: bare, thinking: false, search: false,
+                                onMeta: { box.msgID = $0 })
                         }
-                    }
+                        res = await pumpCollect(account, reqN, box)
+                        attempt += 1
+                        if res.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && sidN == activeSid {
+                            await engine.deleteSession(account: account, sessionID: sidN)
+                        }
+                    } else { attempt += 1 }
                 }
                 var text = res.content
                 if !res.err.isEmpty { text += "\n[上游错误] " + res.err }
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    text = "\n[网关错误] 上游未返回任何内容，请查看鲸聊设置页日志"
+                    text = "\n[网关错误] 上游三次都未返回内容，请稍后重试或查看鲸聊设置页日志"
                 }
                 // 工具调用解析：模型吐了标记就升级成标准 tool_calls 响应
                 var toolCallsJSON: [[String: Any]] = []
