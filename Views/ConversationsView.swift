@@ -8,11 +8,23 @@ struct ConversationsView: View {
     @State private var shareItems: [Any] = []
     @State private var sharing = false
 
+    /// 跨所有会话的所有消息做全文搜索
     private var sorted: [Conversation] {
         let arr = chats.conversations.sorted { $0.updatedAt > $1.updatedAt }
-        guard !searchText.isEmpty else { return arr }
-        return arr.filter { $0.title.localizedCaseInsensitiveContains(searchText)
-            || ($0.messages.last?.content.localizedCaseInsensitiveContains(searchText) ?? false) }
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return arr }
+        // 标题命中 或 任意消息命中
+        return arr.filter { c in
+            if c.title.localizedCaseInsensitiveContains(q) { return true }
+            return c.messages.contains { $0.content.localizedCaseInsensitiveContains(q) }
+        }
+    }
+
+    /// 当前会话在搜索结果中的匹配消息数
+    func matchCount(in c: Conversation) -> Int {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return 0 }
+        return c.messages.filter { $0.content.localizedCaseInsensitiveContains(q) }.count
     }
 
     var body: some View {
@@ -61,6 +73,14 @@ struct ConversationsView: View {
                                 Text(Self.time(c.updatedAt))
                                     .font(.system(size: 11))
                                     .foregroundColor(WX.secondary)
+                                if !searchText.isEmpty {
+                                    let n = matchCount(in: c)
+                                    if n > 0 {
+                                        Text("\(n) 条命中")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(WX.green)
+                                    }
+                                }
                                 if !c.messages.isEmpty {
                                     Circle().fill(WX.badgeRed).frame(width: 8, height: 8)
                                 }
